@@ -2148,6 +2148,211 @@ body {
     }
 }
 
+/* ==============================================================================
+   ENHANCED DASHBOARD-WIDE CYBERNETIC ANIMATIONS
+   ============================================================================== */
+
+/* Navbar live neon sweep */
+.top-navbar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--accent-cyan) 50%, transparent 100%);
+    background-size: 40% 100%;
+    background-repeat: no-repeat;
+    animation: navBeamSweep 4.5s ease-in-out infinite;
+    pointer-events: none;
+}
+
+/* Sidebar nav micro-interactions */
+.nav-link:hover {
+    transform: translateX(4px);
+}
+.nav-link.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 20%;
+    bottom: 20%;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent-cyan);
+    box-shadow: 0 0 10px var(--accent-cyan);
+    animation: blink 2.2s infinite ease-in-out;
+}
+
+/* Card entrance & subtle hover lift across all views */
+.view-section.active .card,
+.view-section.active .sensor-card {
+    animation: cardSlideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.view-section.active .sensor-card:nth-child(1) { animation-delay: 0.03s; }
+.view-section.active .sensor-card:nth-child(2) { animation-delay: 0.07s; }
+.view-section.active .sensor-card:nth-child(3) { animation-delay: 0.11s; }
+.view-section.active .sensor-card:nth-child(4) { animation-delay: 0.15s; }
+.view-section.active .sensor-card:nth-child(5) { animation-delay: 0.19s; }
+.view-section.active .sensor-card:nth-child(6) { animation-delay: 0.23s; }
+
+.charts-2x2-grid .chart-card:nth-child(1) { animation-delay: 0.04s; }
+.charts-2x2-grid .chart-card:nth-child(2) { animation-delay: 0.10s; }
+.charts-2x2-grid .chart-card:nth-child(3) { animation-delay: 0.16s; }
+.charts-2x2-grid .chart-card:nth-child(4) { animation-delay: 0.22s; }
+
+/* Animated energy shimmer inside all progress bars */
+.progress-bar-fill {
+    position: relative;
+    overflow: hidden;
+}
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    transform: translateX(-100%);
+    animation: barEnergyShimmer 2.2s infinite ease-in-out;
+}
+
+/* HUD active halo */
+.hud-btn.active {
+    animation: hudActiveHalo 1.4s ease-in-out infinite alternate;
+}
+
+/* Sensor cards icon float & radar pulse */
+.sensor-card:hover .sensor-icon-wrapper {
+    animation: iconFloat 1.2s ease-in-out infinite alternate;
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.28);
+}
+.radar-box::after {
+    content: '';
+    position: absolute;
+    inset: 14px;
+    border-radius: 50%;
+    border: 1px solid rgba(139, 92, 246, 0.45);
+    animation: miniRadarPulse 2.4s ease-out infinite;
+    pointer-events: none;
+}
+
+/* Analytics chart dots & hover */
+.chart-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 18px rgba(0, 240, 255, 0.12);
+}
+.chart-title-group .indicator-dot {
+    animation: blink 2s infinite ease-in-out;
+}
+
+/* Live Telemetry row & JSON inspector polish */
+.telemetry-table tbody tr {
+    transition: background-color 0.18s ease, transform 0.18s ease;
+}
+.telemetry-table tbody tr:hover {
+    background: rgba(0, 240, 255, 0.05);
+}
+.json-inspector-box {
+    animation: inspectorGlow 4s ease-in-out infinite alternate;
+}
+
+/* Safety & Alerts dynamic pulses */
+.status-banner.banner-danger {
+    animation: dangerBannerPulse 1.5s ease-in-out infinite alternate;
+}
+.status-banner.banner-warning {
+    animation: warnBannerPulse 2.4s ease-in-out infinite alternate;
+}
+.alert-item {
+    animation: slideInRightFade 0.35s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+    transition: transform 0.18s ease, border-color 0.18s ease;
+}
+.alert-item:hover {
+    transform: translateX(3px);
+}
+
+/* Device Info & Session History KPI + PDF button shine */
+.session-kpi-box {
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.session-kpi-box::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+    opacity: 0.45;
+}
+.session-kpi-box:hover {
+    transform: translateY(-2px);
+    border-color: rgba(0, 240, 255, 0.35);
+    box-shadow: 0 6px 20px rgba(0, 240, 255, 0.12);
+}
+.btn-pdf-primary {
+    position: relative;
+    overflow: hidden;
+}
+.btn-pdf-primary::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -120%;
+    width: 60%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    transform: skewX(-20deg);
+    transition: left 0.45s ease;
+}
+.btn-pdf-primary:hover:not(:disabled)::after {
+    left: 140%;
+}
+
+/* Keyframes */
+@keyframes navBeamSweep {
+    0%   { background-position: -40% 0; opacity: 0.35; }
+    50%  { opacity: 0.9; }
+    100% { background-position: 140% 0; opacity: 0.35; }
+}
+@keyframes cardSlideUp {
+    from { opacity: 0; transform: translateY(14px) scale(0.99); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes barEnergyShimmer {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
+}
+@keyframes hudActiveHalo {
+    from { box-shadow: 0 0 12px rgba(0, 240, 255, 0.3); }
+    to   { box-shadow: 0 0 24px rgba(0, 240, 255, 0.65); }
+}
+@keyframes iconFloat {
+    from { transform: translateY(0px); }
+    to   { transform: translateY(-3px); }
+}
+@keyframes miniRadarPulse {
+    0%   { transform: scale(0.45); opacity: 0.85; }
+    100% { transform: scale(1.45); opacity: 0; }
+}
+@keyframes inspectorGlow {
+    from { border-color: rgba(255, 255, 255, 0.08); }
+    to   { border-color: rgba(0, 240, 255, 0.25); }
+}
+@keyframes dangerBannerPulse {
+    from { box-shadow: 0 0 8px rgba(239, 68, 68, 0.15); }
+    to   { box-shadow: 0 0 22px rgba(239, 68, 68, 0.38); }
+}
+@keyframes warnBannerPulse {
+    from { box-shadow: 0 0 6px rgba(245, 158, 11, 0.1); }
+    to   { box-shadow: 0 0 16px rgba(245, 158, 11, 0.25); }
+}
+@keyframes slideInRightFade {
+    from { opacity: 0; transform: translateX(14px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
 /* Prefers-reduced-motion override */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {

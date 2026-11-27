@@ -815,10 +815,10 @@ class PDFReportBuilder:
         if first:
             self.y = self.MT
         else:
-            # Slim continuation header
+            # Slim continuation header (well-spaced left & right)
             self._rect(0, 0, self.W, 28, fill=(0.059, 0.09, 0.165))
-            self._text(self.ML, 18, self.doc_title, size=8.5, bold=True, color=(1, 1, 1))
-            self._text(self.W - self.MR - 130, 18, self.subtitle[:28], size=8, color=(0.58, 0.64, 0.72))
+            self._text(self.ML, 18, self.doc_title[:48], size=8.5, bold=True, color=(1, 1, 1))
+            self._text(self.W - self.MR - 165, 18, self.subtitle[:32], size=7.8, color=(0.58, 0.64, 0.72))
             self.y = 44.0
 
     def ensure_space(self, needed: float):
@@ -861,15 +861,17 @@ class PDFReportBuilder:
         )
 
     def draw_banner(self, title: str, subtitle: str, right_meta: list[str]):
-        self._rect(0, 0, self.W, 74, fill=(0.059, 0.09, 0.165))
-        self._rect(0, 71, self.W, 3, fill=(0.024, 0.714, 0.831))
-        self._text(self.ML, 28, title, size=15.5, bold=True, color=(1, 1, 1))
-        self._text(self.ML, 46, subtitle, size=9.5, color=(0.58, 0.76, 0.86))
+        self._rect(0, 0, self.W, 78, fill=(0.059, 0.09, 0.165))
+        self._rect(0, 75, self.W, 3, fill=(0.024, 0.714, 0.831))
+        # Right metadata box occupies x=[394..559], leaving x=[36..384] strictly for title/subtitle
+        self._rect(self.W - self.MR - 168, 12, 168, 52, fill=(0.094, 0.141, 0.235), stroke=(0.18, 0.27, 0.39), lw=0.6)
+        self._text(self.ML, 30, _pdf_clean(title)[:40], size=12.5, bold=True, color=(1, 1, 1))
+        self._text(self.ML, 49, _pdf_clean(subtitle)[:58], size=8.6, color=(0.58, 0.76, 0.86))
         ry = 25
         for line in right_meta[:3]:
-            self._text(self.W - self.MR - 170, ry, line, size=8.2, mono=True, color=(0.82, 0.88, 0.94))
-            ry += 13
-        self.y = 90.0
+            self._text(self.W - self.MR - 160, ry, _pdf_clean(line)[:29], size=7.6, mono=True, color=(0.82, 0.88, 0.94))
+            ry += 14
+        self.y = 94.0
 
     def draw_kpi_row(self, cards: list[tuple[str, str, str]]):
         self.ensure_space(56)
@@ -880,15 +882,15 @@ class PDFReportBuilder:
             x = self.ML + i * (cw + gap)
             self._rect(x, self.y, cw, 46, fill=(0.969, 0.980, 0.988), stroke=(0.82, 0.86, 0.90), lw=0.7)
             self._rect(x, self.y, 3, 46, fill=(0.024, 0.714, 0.831))
-            self._text(x + 9, self.y + 13, lbl[:24], size=7.2, bold=True, color=(0.39, 0.45, 0.55))
-            self._text(x + 9, self.y + 28, val[:20], size=11.0, bold=True, color=(0.06, 0.09, 0.17))
-            self._text(x + 9, self.y + 40, sub[:26], size=7.2, color=(0.45, 0.50, 0.58))
+            self._text(x + 8, self.y + 13, _pdf_clean(lbl)[:20], size=6.8, bold=True, color=(0.39, 0.45, 0.55))
+            self._text(x + 8, self.y + 28, _pdf_clean(val)[:19], size=9.2, bold=True, color=(0.06, 0.09, 0.17))
+            self._text(x + 8, self.y + 40, _pdf_clean(sub)[:24], size=6.8, color=(0.45, 0.50, 0.58))
         self.y += 58.0
 
     def draw_section(self, title: str):
         self.ensure_space(28)
         self._rect(self.ML, self.y + 2, 3.5, 13, fill=(0.024, 0.714, 0.831))
-        self._text(self.ML + 9, self.y + 12, title, size=11, bold=True, color=(0.06, 0.09, 0.17))
+        self._text(self.ML + 9, self.y + 12, _pdf_clean(title)[:74], size=10.5, bold=True, color=(0.06, 0.09, 0.17))
         self.y += 18.0
         self._line(self.ML, self.y, self.W - self.MR, self.y, color=(0.84, 0.87, 0.91), lw=0.7)
         self.y += 8.0
@@ -896,6 +898,7 @@ class PDFReportBuilder:
     def draw_kv_grid(self, items: list[tuple[str, str]], cols: int = 2):
         col_w = self.cw / cols
         row_h = 16.0
+        label_offset = 94.0
         for idx in range(0, len(items), cols):
             self.ensure_space(row_h + 4)
             if (idx // cols) % 2 == 0:
@@ -905,10 +908,10 @@ class PDFReportBuilder:
                     break
                 k, v = items[idx + c]
                 x = self.ML + c * col_w + 5
-                self._text(x, self.y + 11, f"{k}:", size=8.0, bold=True, color=(0.35, 0.42, 0.52))
-                max_chars = int((col_w - 92) / 4.4)
+                self._text(x, self.y + 11, f"{_pdf_clean(k)[:18]}:", size=7.8, bold=True, color=(0.35, 0.42, 0.52))
+                max_chars = int((col_w - label_offset - 8) / 4.4)
                 val_s = _pdf_clean(v)[:max(12, max_chars)]
-                self._text(x + 86, self.y + 11, val_s, size=8.0, color=(0.09, 0.13, 0.20))
+                self._text(x + label_offset, self.y + 11, val_s, size=7.8, color=(0.09, 0.13, 0.20))
             self.y += row_h
         self.y += 8.0
 
@@ -1140,7 +1143,7 @@ def _build_session_pdf(sess: dict) -> bytes:
         f"Unit: {sess['device_id']} | {sess['started_local']}",
     )
     pdf.draw_banner(
-        "AEGIS ROVER - INDIVIDUAL SESSION TELEMETRY REPORT",
+        "AEGIS ROVER - SESSION TELEMETRY REPORT",
         f"Session ID: {sess['session_uid']}  |  Car ON: {sess['started_local']}",
         [f"Unit: {sess['device_id']}", f"Duration: {sess['duration_text']}", f"Status: {'ACTIVE' if sess['is_active'] else 'COMPLETED'}"],
     )

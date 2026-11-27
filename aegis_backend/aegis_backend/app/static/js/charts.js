@@ -50,12 +50,12 @@ const Charts = (() => {
                 },
                 y: {
                     min: minY,
-                    max: maxY,
+                    suggestedMax: maxY,
                     grid: { color: 'rgba(255, 255, 255, 0.05)' },
                     ticks: {
                         color: '#64748b',
                         font: { family: 'JetBrains Mono, monospace', size: 10 },
-                        stepSize: 500,
+                        maxTicksLimit: 6,
                         callback: v => `${v}${unit ? ' ' + unit : ''}`,
                     },
                 },
@@ -97,10 +97,10 @@ const Charts = (() => {
     }
 
     function init() {
-        _createChart('chart-temperature', 'Temperature', '0, 240, 255', '°C', 0, 2000);
-        _createChart('chart-humidity', 'Humidity', '16, 185, 129', '%', 0, 2000);
+        _createChart('chart-temperature', 'Temperature', '0, 240, 255', '°C', 0, 50);
+        _createChart('chart-humidity', 'Humidity', '16, 185, 129', '%', 0, 100);
         _createChart('chart-gas', 'Gas ADC', '245, 158, 11', 'ADC', 0, 2000);
-        _createChart('chart-distance', 'Distance', '139, 92, 246', 'cm', 0, 2000);
+        _createChart('chart-distance', 'Distance', '139, 92, 246', 'cm', 0, 150);
     }
 
     function _push(canvasId, label, value) {
