@@ -59,12 +59,19 @@
     let _historyLoaded = false;
     let _lastChartTickMs = 0;
     let _backendOnline = false;
+    let _mainOnline = false;
+    let _prevMainOnline = null;
+    let _lastSessionRefreshMs = 0;
+    let _ctrlFeedbackTimer = null;
+    const _ctrlDragging = { speedA: false, speedB: false, servo: false, stopCm: false };
 
     document.addEventListener('DOMContentLoaded', () => {
         _initNavigation();
         _initMobileSidebar();
-        _initUrlConfig();
         _initEStop();
+        _initControls();
+        _initSessionHistory();
+        _initInteractiveEffects();
 
         Charts.init();
         Camera.init();
@@ -76,13 +83,16 @@
         API.on('wsOpen', _onWsOpen);
         API.on('wsClose', _onWsClose);
         API.on('snapshot', _onSnapshot);
-        API.on('error', err => console.warn('[Dashboard]', err.message));
+        API.on('error', err => {
+            console.warn('[Dashboard]', err.message);
+            _showControlFeedback(err.message, false);
+        });
 
         _bootstrapBackend();
     });
 
     async function _bootstrapBackend() {
-        _updateEndpointLabels();
+        _setText('info-gateway-url', API.getBaseUrl());
         try {
             const snap = await API.getStatus();
             if (snap && snap.tel) {
@@ -138,6 +148,8 @@
             } else {
                 Charts.refresh();
             }
+        } else if (target === 'device') {
+            _loadSessionHistory();
         }
     }
 
@@ -279,18 +291,31 @@
         _updateDirectionHUD(motion, displayDir);
 
         const blocked = Boolean(mainData.blocked);
+        const stopCm = mainData.stop_cm || 20;
+        const dist = tel.front_dist_cm;
+        const isNear = typeof dist === 'number' && dist < 999 && dist <= stopCm + 25;
+
+        const stage = document.getElementById('vehicle-stage');
         const wrapper = document.getElementById('vehicle-svg-wrapper');
         if (wrapper) {
             wrapper.setAttribute('data-motion', motion || 'stop');
             wrapper.classList.toggle('vehicle-blocked', blocked || estop);
         }
+        if (stage) {
+            stage.classList.toggle('stage-near', isNear && !blocked && !estop);
+        }
 
         // Rotate nose ultrasonic servo beam using real ESP32 servo angle (0..180, 90=center)
         const servoBeam = document.getElementById('nose-servo-beam');
-        if (servoBeam && mainData.servo != null && !Number.isNaN(Number(mainData.servo))) {
-            const deg = Math.max(-90, Math.min(90, Number(mainData.servo) - 90));
+        if (servoBeam && !_ctrlDragging.servo && mainData.servo != null && !Number.isNaN(Number(mainData.servo))) {
+            const servoAngle = Math.max(0, Math.min(180, Math.round(Number(mainData.servo))));
+            const deg = Math.max(-90, Math.min(90, servoAngle - 90));
             servoBeam.style.transform = `rotate(${deg}deg)`;
-            servoBeam.style.opacity = '0.75';
+            servoBeam.style.opacity = '0.82';
+            _setText('hud-servo-pill', `SERVO: ${servoAngle}°`);
+        }
+        if (!_ctrlDragging.stopCm) {
+            _setText('hud-range-pill', `STOP: ${stopCm}cm`);
         }
 
         const blockedBadge = document.getElementById('hero-blocked-badge');
@@ -312,12 +337,20 @@
             statusBadge.textContent = mainData.glove_link ? 'GLOVE LINK ACTIVE' : 'ESP32 DUAL-MOTOR';
         }
 
-        // Differential Motor Gauges
+        // Differential Motor Gauges & Speed-Responsive Animations
         const speedAPct = _clampPct(mainData.speedA);
         const speedBPct = _clampPct(mainData.speedB);
         const isMoving = motion && motion !== 'stop' && !(motion === 'forward' && blocked) && !estop;
         const pwmA = speedAPct !== null ? (isMoving ? Math.round((speedAPct / 100) * 255) : 0) : null;
         const pwmB = speedBPct !== null ? (isMoving ? Math.round((speedBPct / 100) * 255) : 0) : null;
+
+        if (stage) {
+            const avgSpd = ((speedAPct ?? 50) + (speedBPct ?? 50)) / 2;
+            const driveDur = Math.max(0.22, 0.9 - (avgSpd / 100) * 0.65).toFixed(2);
+            const wheelDur = Math.max(0.14, 0.55 - (avgSpd / 100) * 0.38).toFixed(2);
+            stage.style.setProperty('--drive-dur', `${driveDur}s`);
+            stage.style.setProperty('--wheel-dur', `${wheelDur}s`);
+        }
 
         _setText('val-motor-a-pct', speedAPct !== null ? `${speedAPct}%` : '--');
         _setText('val-motor-b-pct', speedBPct !== null ? `${speedBPct}%` : '--');
@@ -331,6 +364,13 @@
         _setText('val-motor-b-card', estop ? 'E-STOP' : (isMoving ? 'ENB ACTIVE' : 'ENB STANDBY'));
         _setText('badge-motor-a-status', speedAPct !== null ? `${speedAPct}% LIMIT` : 'CHANNEL A');
         _setText('badge-motor-b-status', speedBPct !== null ? `${speedBPct}% LIMIT` : 'CHANNEL B');
+
+        _mainOnline = true;
+        _syncControlsFromTelemetry(mainData, estop, true);
+        if (_prevMainOnline === false) {
+            _loadSessionHistory();
+        }
+        _prevMainOnline = true;
     }
 
     function _updateDirectionHUD(motion, labelText) {
@@ -605,6 +645,12 @@
                 `;
             }).join('');
         }
+
+        const deviceSec = document.getElementById('view-device');
+        const nowMs = Date.now();
+        if (deviceSec && deviceSec.classList.contains('active') && nowMs - _lastSessionRefreshMs >= 3000) {
+            _loadSessionHistory();
+        }
     }
 
     function _renderDbPill(db) {
@@ -617,17 +663,25 @@
 
     /* ── Offline / Disconnected States ───────────────────────── */
     function _renderMainOfflineState(tel, estop) {
+        _mainOnline = false;
         _updateDirectionHUD(null, 'NO SIGNAL');
+        const stage = document.getElementById('vehicle-stage');
+        if (stage) stage.classList.remove('stage-near');
         const wrapper = document.getElementById('vehicle-svg-wrapper');
         if (wrapper) {
             wrapper.setAttribute('data-motion', 'stop');
             wrapper.classList.toggle('vehicle-blocked', estop);
         }
         const servoBeam = document.getElementById('nose-servo-beam');
-        if (servoBeam) {
+        if (servoBeam && !_ctrlDragging.servo) {
             servoBeam.style.transform = 'rotate(0deg)';
-            servoBeam.style.opacity = '0.2';
+            servoBeam.style.opacity = '0.25';
         }
+        _syncControlsFromTelemetry({}, estop, false);
+        if (_prevMainOnline === true) {
+            _loadSessionHistory();
+        }
+        _prevMainOnline = false;
         _setBadge('hero-blocked-badge', estop ? 'badge-danger' : 'badge-warning', estop ? 'E-STOP ACTIVE' : 'CAR OFFLINE');
 
         _setText('val-motor-a-pct', '--');
@@ -685,7 +739,7 @@
         Camera.setOffline('STREAM UNAVAILABLE', 'Backend server disconnected');
     }
 
-    /* ── E-Stop & Backend URL Config ─────────────────────────── */
+    /* ── E-Stop ───────────────────────────────────────────────── */
     function _initEStop() {
         const btn = document.getElementById('btn-estop');
         if (!btn) return;
@@ -706,36 +760,466 @@
         btn.textContent = active ? 'RELEASE E-STOP' : 'E-STOP';
     }
 
-    function _initUrlConfig() {
-        const input = document.getElementById('input-backend-url');
-        const saveBtn = document.getElementById('btn-save-backend-url');
-        _updateEndpointLabels();
+    /* ── Hardware Controls (Motor Speed, Servo Angle, Ultrasonic Range) ── */
+    function _initControls() {
+        const speedA = document.getElementById('ctrl-speed-a');
+        const speedB = document.getElementById('ctrl-speed-b');
+        const syncChk = document.getElementById('ctrl-speed-sync');
+        const speedApply = document.getElementById('ctrl-speed-apply');
 
-        if (saveBtn && input) {
-            saveBtn.addEventListener('click', () => {
-                const raw = input.value.trim();
-                if (!raw) return;
-                try {
-                    API.disconnect();
-                    API.setBaseUrl(raw);
-                    _updateEndpointLabels();
-                    _historyLoaded = false;
-                    Charts.clear();
-                    _setDisconnectedState();
-                    _setText('connection-status-text', 'Reconnecting...');
-                    _bootstrapBackend();
-                } catch (err) {
-                    alert(err.message);
-                }
+        const servoInput = document.getElementById('ctrl-servo-angle');
+        const servoSweep = document.getElementById('ctrl-servo-sweep');
+
+        const stopCmInput = document.getElementById('ctrl-stop-cm');
+        const rangeApply = document.getElementById('ctrl-range-apply');
+
+        [speedA, speedB, servoInput, stopCmInput].forEach(_setSliderFill);
+
+        function bindDrag(el, key) {
+            if (!el) return;
+            const start = () => { _ctrlDragging[key] = true; };
+            const end = () => { _ctrlDragging[key] = false; };
+            el.addEventListener('pointerdown', start);
+            el.addEventListener('touchstart', start, { passive: true });
+            el.addEventListener('blur', end);
+            window.addEventListener('pointerup', end);
+            window.addEventListener('touchend', end, { passive: true });
+        }
+
+        bindDrag(speedA, 'speedA');
+        bindDrag(speedB, 'speedB');
+        bindDrag(servoInput, 'servo');
+        bindDrag(stopCmInput, 'stopCm');
+
+        // Motor A & B sliders
+        const updateSpeedReadouts = () => {
+            if (speedA) {
+                _setText('ctrl-speed-a-val', `${speedA.value}%`);
+                _setSliderFill(speedA);
+            }
+            if (speedB) {
+                _setText('ctrl-speed-b-val', `${speedB.value}%`);
+                _setSliderFill(speedB);
+            }
+        };
+
+        const commitSpeeds = () => {
+            if (!speedA || !speedB) return;
+            _ctrlDragging.speedA = false;
+            _ctrlDragging.speedB = false;
+            if (_lastSnapshot && _lastSnapshot.estop) {
+                _showControlFeedback('Release E-STOP before setting motor speed', false);
+                return;
+            }
+            const a = Number(speedA.value);
+            const b = Number(speedB.value);
+            _sendHardwareCommand({ cmd: 'config', speedA: a, speedB: b }, `Speed ${a}% / ${b}%`);
+        };
+
+        if (speedA) {
+            speedA.addEventListener('input', () => {
+                if (syncChk && syncChk.checked && speedB) speedB.value = speedA.value;
+                updateSpeedReadouts();
             });
+            speedA.addEventListener('change', commitSpeeds);
+        }
+        if (speedB) {
+            speedB.addEventListener('input', () => {
+                if (syncChk && syncChk.checked && speedA) speedA.value = speedB.value;
+                updateSpeedReadouts();
+            });
+            speedB.addEventListener('change', commitSpeeds);
+        }
+        if (speedApply) {
+            speedApply.addEventListener('click', commitSpeeds);
+        }
+        document.querySelectorAll('[data-speed-preset]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const v = Number(btn.dataset.speedPreset);
+                if (speedA) speedA.value = String(v);
+                if (speedB) speedB.value = String(v);
+                updateSpeedReadouts();
+                commitSpeeds();
+            });
+        });
+
+        // Servo Angle slider + Auto Sweep
+        const previewServo = (angle) => {
+            _setText('ctrl-servo-val', `${angle}°`);
+            _setText('hud-servo-pill', `SERVO: ${angle}°`);
+            _setText('ctrl-servo-mode', 'MANUAL');
+            const beam = document.getElementById('nose-servo-beam');
+            if (beam) {
+                const deg = Math.max(-90, Math.min(90, angle - 90));
+                beam.style.transform = `rotate(${deg}deg)`;
+                beam.style.opacity = '0.88';
+            }
+        };
+
+        const commitServo = (angle) => {
+            _ctrlDragging.servo = false;
+            _sendHardwareCommand({ cmd: 'servo', angle }, `Servo ${angle}°`);
+        };
+
+        if (servoInput) {
+            servoInput.addEventListener('input', () => {
+                _setSliderFill(servoInput);
+                previewServo(Number(servoInput.value));
+            });
+            servoInput.addEventListener('change', () => commitServo(Number(servoInput.value)));
+        }
+        document.querySelectorAll('[data-servo-preset]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const angle = Number(btn.dataset.servoPreset);
+                if (servoInput) {
+                    servoInput.value = String(angle);
+                    _setSliderFill(servoInput);
+                }
+                previewServo(angle);
+                commitServo(angle);
+            });
+        });
+        if (servoSweep) {
+            servoSweep.addEventListener('click', () => {
+                _ctrlDragging.servo = false;
+                _setText('ctrl-servo-mode', 'SWEEP');
+                _sendHardwareCommand({ cmd: 'servo', mode: 'sweep' }, 'Servo Auto Sweep');
+            });
+        }
+
+        // Ultrasonic Range (stop_cm) slider
+        const previewRange = (cm) => {
+            _setText('ctrl-stop-cm-val', `${cm} cm`);
+            _setText('ctrl-warn-cm-val', `Warn Zone: ≤ ${cm + 40} cm`);
+            _setText('hud-range-pill', `STOP: ${cm}cm`);
+            _setText('distance-threshold-desc', `Obstacle Alert Threshold: ≤ ${Number(cm).toFixed(1)} cm`);
+        };
+
+        const commitRange = (cm) => {
+            _ctrlDragging.stopCm = false;
+            _sendHardwareCommand({ cmd: 'config', stop_cm: cm }, `Stop Range ${cm} cm`);
+        };
+
+        if (stopCmInput) {
+            stopCmInput.addEventListener('input', () => {
+                _setSliderFill(stopCmInput);
+                previewRange(Number(stopCmInput.value));
+            });
+            stopCmInput.addEventListener('change', () => commitRange(Number(stopCmInput.value)));
+        }
+        document.querySelectorAll('[data-range-preset]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const cm = Number(btn.dataset.rangePreset);
+                if (stopCmInput) {
+                    stopCmInput.value = String(cm);
+                    _setSliderFill(stopCmInput);
+                }
+                previewRange(cm);
+                commitRange(cm);
+            });
+        });
+        if (rangeApply && stopCmInput) {
+            rangeApply.addEventListener('click', () => commitRange(Number(stopCmInput.value)));
         }
     }
 
-    function _updateEndpointLabels() {
-        const url = API.getBaseUrl();
-        const input = document.getElementById('input-backend-url');
-        if (input) input.value = url;
-        _setText('info-gateway-url', url);
+    function _syncControlsFromTelemetry(mainData, estop, online) {
+        const badge = document.getElementById('ctrl-sync-badge');
+        if (badge) {
+            if (estop) {
+                badge.className = 'status-badge badge-danger';
+                badge.textContent = 'E-STOP LOCKED';
+            } else if (online) {
+                badge.className = 'status-badge badge-success';
+                badge.textContent = 'LIVE SYNCED';
+            } else {
+                badge.className = 'status-badge badge-warning';
+                badge.textContent = 'CAR OFFLINE';
+            }
+        }
+
+        const speedA = document.getElementById('ctrl-speed-a');
+        const speedB = document.getElementById('ctrl-speed-b');
+        const speedApply = document.getElementById('ctrl-speed-apply');
+        if (speedA) speedA.disabled = Boolean(estop);
+        if (speedB) speedB.disabled = Boolean(estop);
+        if (speedApply) speedApply.disabled = Boolean(estop);
+        document.querySelectorAll('[data-speed-preset]').forEach(btn => {
+            btn.disabled = Boolean(estop);
+        });
+
+        if (!online) return;
+
+        if (speedA && !_ctrlDragging.speedA && mainData.speedA != null) {
+            const a = _clampPct(mainData.speedA);
+            if (a !== null) {
+                speedA.value = String(a);
+                _setText('ctrl-speed-a-val', `${a}%`);
+                _setSliderFill(speedA);
+            }
+        }
+        if (speedB && !_ctrlDragging.speedB && mainData.speedB != null) {
+            const b = _clampPct(mainData.speedB);
+            if (b !== null) {
+                speedB.value = String(b);
+                _setText('ctrl-speed-b-val', `${b}%`);
+                _setSliderFill(speedB);
+            }
+        }
+
+        const servoInput = document.getElementById('ctrl-servo-angle');
+        if (servoInput && !_ctrlDragging.servo && mainData.servo != null) {
+            const ang = Math.max(0, Math.min(180, Math.round(Number(mainData.servo))));
+            servoInput.value = String(ang);
+            _setText('ctrl-servo-val', `${ang}°`);
+            _setSliderFill(servoInput);
+        }
+        if (mainData.servo_mode) {
+            _setText('ctrl-servo-mode', String(mainData.servo_mode).toUpperCase());
+        }
+
+        const stopCmInput = document.getElementById('ctrl-stop-cm');
+        if (stopCmInput && !_ctrlDragging.stopCm && mainData.stop_cm != null) {
+            const cm = Math.max(5, Math.min(100, Math.round(Number(mainData.stop_cm))));
+            stopCmInput.value = String(cm);
+            _setText('ctrl-stop-cm-val', `${cm} cm`);
+            _setText('ctrl-warn-cm-val', `Warn Zone: ≤ ${cm + 40} cm`);
+            _setSliderFill(stopCmInput);
+        }
+    }
+
+    async function _sendHardwareCommand(payload, label) {
+        if (!_backendOnline) {
+            _showControlFeedback('Backend offline', false);
+            return;
+        }
+        if (!_mainOnline) {
+            _showControlFeedback('ESP32 Car offline — connect Rover to apply', false);
+            return;
+        }
+        try {
+            await API.sendCommand(payload);
+            _showControlFeedback(`Sent: ${label}`, true);
+        } catch (err) {
+            _showControlFeedback(err.message || 'Command failed', false);
+        }
+    }
+
+    function _showControlFeedback(msg, ok) {
+        const el = document.getElementById('ctrl-cmd-feedback');
+        if (!el) return;
+        el.textContent = msg;
+        el.className = `ctrl-feedback ${ok ? 'ok' : 'err'}`;
+        clearTimeout(_ctrlFeedbackTimer);
+        _ctrlFeedbackTimer = setTimeout(() => {
+            el.classList.add('hidden');
+        }, 3200);
+    }
+
+    function _setSliderFill(el) {
+        if (!el) return;
+        const min = Number(el.min || 0);
+        const max = Number(el.max || 100);
+        const val = Number(el.value || 0);
+        const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+        el.style.setProperty('--range-pct', `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`);
+    }
+
+    /* ── Interactive Visual Effects (Stage 3D Parallax + Sonar Ping) ── */
+    function _initInteractiveEffects() {
+        const stage = document.getElementById('vehicle-stage');
+        const pingRing = document.getElementById('sonar-ping-ring');
+        if (stage) {
+            stage.addEventListener('mousemove', e => {
+                const rect = stage.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                const nx = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
+                const ny = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
+                stage.style.setProperty('--tilt-x', `${(nx * 6).toFixed(2)}deg`);
+                stage.style.setProperty('--tilt-y', `${(-ny * 6).toFixed(2)}deg`);
+            });
+            stage.addEventListener('mouseleave', () => {
+                stage.style.setProperty('--tilt-x', '0deg');
+                stage.style.setProperty('--tilt-y', '0deg');
+            });
+            stage.addEventListener('click', () => {
+                if (!pingRing) return;
+                pingRing.classList.remove('pinging');
+                void pingRing.offsetWidth;
+                pingRing.classList.add('pinging');
+            });
+        }
+
+        document.querySelectorAll('.hud-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                btn.classList.remove('hud-pulse');
+                void btn.offsetWidth;
+                btn.classList.add('hud-pulse');
+            });
+        });
+    }
+
+    /* ── Vehicle Session History & PDF Report (Device Info) ──── */
+    function _todayLocalIso() {
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+
+    function _initSessionHistory() {
+        const picker = document.getElementById('session-date-picker');
+        const refreshBtn = document.getElementById('btn-refresh-sessions');
+        const dailyPdfBtn = document.getElementById('btn-download-daily-pdf');
+
+        if (picker && !picker.value) {
+            picker.value = _todayLocalIso();
+        }
+        if (picker) {
+            picker.addEventListener('change', () => _loadSessionHistory());
+        }
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => _loadSessionHistory());
+        }
+        if (dailyPdfBtn) {
+            dailyPdfBtn.addEventListener('click', () => {
+                const dateVal = picker ? picker.value : _todayLocalIso();
+                _downloadPdf(
+                    API.getDailyReportPdfUrl(dateVal),
+                    `aegis_daily_report_${dateVal}.pdf`,
+                    dailyPdfBtn
+                );
+            });
+        }
+        _loadSessionHistory();
+    }
+
+    async function _loadSessionHistory() {
+        _lastSessionRefreshMs = Date.now();
+        const picker = document.getElementById('session-date-picker');
+        const dateVal = picker && picker.value ? picker.value : _todayLocalIso();
+        try {
+            const data = await API.getSessions(dateVal);
+            _renderSessionHistory(data);
+        } catch (err) {
+            _setText('session-stat-status-msg', `Error loading history: ${err.message}`);
+        }
+    }
+
+    function _renderSessionHistory(data) {
+        if (!data) return;
+        _setText('session-stat-cycles', `${data.on_count ?? 0} ON / ${data.off_count ?? 0} OFF`);
+        _setText('session-stat-cycles-sub', `Date: ${data.date}`);
+        _setText('session-stat-total-dur', data.total_duration_text || '00m 00s');
+        _setText('session-stat-total-sub', `${data.total_duration_s ?? 0}s total active`);
+        _setText('session-stat-window', `${data.first_on_local || '--'} / ${data.last_off_local || '--'}`);
+
+        const liveEl = document.getElementById('session-stat-live');
+        if (liveEl) {
+            if (data.active_now) {
+                liveEl.textContent = 'ONLINE (ACTIVE)';
+                liveEl.className = 'session-kpi-val font-mono text-success';
+            } else {
+                liveEl.textContent = 'OFFLINE';
+                liveEl.className = 'session-kpi-val font-mono text-muted';
+            }
+        }
+        _setText('session-stat-status-msg', `${(data.sessions || []).length} session(s) stored`);
+
+        const tbody = document.getElementById('sessions-history-tbody');
+        if (!tbody) return;
+        const list = data.sessions || [];
+        if (list.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="text-muted text-xs" style="padding:18px;text-align:center">
+                        No Car ON/OFF sessions recorded on ${_esc(data.date)}. Connect ESP32 Car to start automatic tracking.
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        const avgVal = (st, d = 0) => (st && st.count ? (st.sum / st.count).toFixed(d) : null);
+        tbody.innerHTML = list.map((s, idx) => {
+            const sm = s.summary || {};
+            const stBadge = s.is_active
+                ? '<span class="status-badge badge-success pulse">LIVE</span>'
+                : '<span class="status-badge badge-info">ENDED</span>';
+            const spdA = avgVal(sm.speed_a, 0) ?? '--';
+            const spdB = avgVal(sm.speed_b, 0) ?? '--';
+            const srv = sm.servo_angle || {};
+            const srvText = srv.count ? `${Math.round(srv.min)}°–${Math.round(srv.max)}°` : '--';
+            const dst = sm.front_dist_cm || {};
+            const stp = sm.stop_cm || {};
+            const dstText = dst.count ? `${Math.round(dst.min)}cm` : '--';
+            const stpText = stp.last != null ? `${Math.round(stp.last)}cm` : '20cm';
+
+            const tmp = avgVal(sm.temp_c, 1);
+            const hum = avgVal(sm.humidity_pct, 0);
+            const gasMax = sm.gas_raw && sm.gas_raw.count ? Math.round(sm.gas_raw.max) : null;
+            const sensorSummary = `${tmp !== null ? `${tmp}°C` : '--'} • ${hum !== null ? `${hum}%` : '--'} • ${gasMax !== null ? `${gasMax} ADC` : '--'}`;
+
+            return `
+                <tr>
+                    <td class="font-mono text-muted">${list.length - idx}</td>
+                    <td>
+                        ${stBadge}
+                        <div class="text-xs text-muted" style="margin-top:3px">${_esc(s.off_reason || s.on_reason || '')}</div>
+                    </td>
+                    <td class="font-mono text-xs text-primary">${_esc(s.started_local)}</td>
+                    <td class="font-mono text-xs ${s.is_active ? 'text-success font-semibold' : 'text-secondary'}">${_esc(s.ended_local)}</td>
+                    <td class="font-mono font-semibold text-cyan">${_esc(s.duration_text)}</td>
+                    <td class="font-mono text-xs">Spd ${spdA}/${spdB}% • Srv ${srvText} • Min ${dstText} (Stop ${stpText})</td>
+                    <td class="font-mono text-xs">${_esc(sensorSummary)}</td>
+                    <td>
+                        <button type="button" class="btn-session-pdf" data-session-uid="${_esc(s.session_uid)}" data-session-date="${_esc((s.started_local || '').slice(0, 10))}">
+                            PDF
+                        </button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        tbody.querySelectorAll('.btn-session-pdf').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const uid = btn.dataset.sessionUid;
+                const dt = btn.dataset.sessionDate || 'report';
+                _downloadPdf(
+                    API.getSessionPdfUrl(uid),
+                    `aegis_session_${uid}_${dt}.pdf`,
+                    btn
+                );
+            });
+        });
+    }
+
+    async function _downloadPdf(url, filename, btn) {
+        const origHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Generating…';
+        }
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const objUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+            _setText('session-stat-status-msg', `Downloaded ${filename}`);
+        } catch (err) {
+            _setText('session-stat-status-msg', `PDF export failed: ${err.message}`);
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
     }
 
     /* ── Helpers ─────────────────────────────────────────────── */

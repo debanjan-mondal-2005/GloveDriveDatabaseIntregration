@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS public.telemetry_logs (
     control_lock     TEXT,                           -- "GLOVE_ESPNOW" | "HUB_ESTOP"
     emergency_stop   BOOLEAN     NOT NULL DEFAULT FALSE,
 
+    -- Actuator & range configuration
+    servo_angle      INT         DEFAULT 90,
+    stop_cm          INT         DEFAULT 20,
+
     -- Distance sensor (ultrasonic)
     front_dist_cm    INT,                            -- 999 = no reading
 
@@ -113,6 +117,30 @@ CREATE INDEX IF NOT EXISTS idx_vision_device_time
 
 
 -- ─────────────────────────────────────────────
+-- 5. VEHICLE SESSIONS
+--    Stores every Car ON/OFF session, duration,
+--    aggregated telemetry, and timeline samples
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.vehicle_sessions (
+    id                BIGSERIAL PRIMARY KEY,
+    session_uid       TEXT             UNIQUE NOT NULL,
+    device_id         TEXT             NOT NULL,
+    started_at        TIMESTAMPTZ      NOT NULL,
+    ended_at          TIMESTAMPTZ,
+    duration_s        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    is_active         BOOLEAN          NOT NULL DEFAULT TRUE,
+    on_reason         TEXT             DEFAULT 'ESP32 Car Connected',
+    off_reason        TEXT,
+    telemetry_summary JSONB            NOT NULL DEFAULT '{}'::jsonb,
+    telemetry_samples JSONB            NOT NULL DEFAULT '[]'::jsonb,
+    updated_at        TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_device_started
+    ON public.vehicle_sessions (device_id, started_at DESC);
+
+
+-- ─────────────────────────────────────────────
 -- Row-Level Security: open for server-side use
 -- (enable RLS if you expose these to a browser client)
 -- ─────────────────────────────────────────────
@@ -120,6 +148,7 @@ ALTER TABLE public.telemetry_logs    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.safety_alerts     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.device_nodes      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vision_snapshots  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vehicle_sessions  ENABLE ROW LEVEL SECURITY;
 
 -- Allow the service-role key (backend) full access
 -- (drop first so the script is re-runnable)
@@ -135,5 +164,8 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_vision' AND tablename='vision_snapshots') THEN
     CREATE POLICY "service_all_vision" ON public.vision_snapshots FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_sessions' AND tablename='vehicle_sessions') THEN
+    CREATE POLICY "service_all_sessions" ON public.vehicle_sessions FOR ALL USING (true) WITH CHECK (true);
   END IF;
 END $$;

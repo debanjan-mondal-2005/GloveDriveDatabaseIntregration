@@ -13,10 +13,16 @@
  */
 
 const API = (() => {
-    const STORAGE_KEY = 'neon_drive_backend_url';
     const MAX_BACKOFF_MS = 30000;
 
-    let _baseUrl = _resolveInitialUrl();
+    // Clear any stale saved endpoint override from earlier versions
+    try {
+        localStorage.removeItem('neon_drive_backend_url');
+    } catch (_) {
+        // ignore storage restrictions
+    }
+
+    const _baseUrl = window.location.origin.replace(/\/+$/, '');
     let _ws = null;
     let _reconnectTimer = null;
     let _backoffMs = 1000;
@@ -28,31 +34,6 @@ const API = (() => {
         wsClose: [],
         error: [],
     };
-
-    function _resolveInitialUrl() {
-        try {
-            const saved = localStorage.getItem(STORAGE_KEY);
-            if (saved && /^https?:\/\/.+/.test(saved)) {
-                return saved.replace(/\/+$/, '');
-            }
-        } catch (_) {
-            // ignore storage restrictions
-        }
-        return window.location.origin.replace(/\/+$/, '');
-    }
-
-    function setBaseUrl(url) {
-        const clean = (url || '').trim().replace(/\/+$/, '');
-        if (!/^https?:\/\/.+/.test(clean)) {
-            throw new Error('Invalid backend URL. Expected http:// or https://');
-        }
-        _baseUrl = clean;
-        try {
-            localStorage.setItem(STORAGE_KEY, _baseUrl);
-        } catch (_) {
-            // ignore
-        }
-    }
 
     function getBaseUrl() {
         return _baseUrl;
@@ -82,10 +63,21 @@ const API = (() => {
                 ...options,
                 signal: controller.signal,
             });
+            // Read body ONCE — either as error detail or as JSON result
+            const text = await response.text();
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+                let detail = '';
+                try { const j = JSON.parse(text); detail = j.detail || j.message || ''; } catch (_) {}
+                throw new Error(`HTTP ${response.status}${detail ? ': ' + detail : ''}`);
             }
-            return await response.json();
+            try {
+                return JSON.parse(text);
+            } catch (_) {
+                throw new Error('Backend returned non-JSON response');
+            }
+        } catch (err) {
+            if (err.name === 'AbortError') throw new Error('Request timed out — is the backend reachable at ' + _baseUrl + '?');
+            throw err;
         } finally {
             clearTimeout(timeoutId);
         }
@@ -111,6 +103,20 @@ const API = (() => {
         return fetchJSON(`/api/alerts/${encodeURIComponent(alertId)}/ack`, {
             method: 'POST',
         });
+    }
+
+    function getSessions(dateStr) {
+        const q = dateStr ? `?date=${encodeURIComponent(dateStr)}` : '';
+        return fetchJSON(`/api/sessions${q}`);
+    }
+
+    function getDailyReportPdfUrl(dateStr) {
+        const q = dateStr ? `?date=${encodeURIComponent(dateStr)}` : '';
+        return `${_baseUrl}/api/sessions/report.pdf${q}`;
+    }
+
+    function getSessionPdfUrl(sessionUid) {
+        return `${_baseUrl}/api/sessions/${encodeURIComponent(sessionUid)}/report.pdf`;
     }
 
     function connect() {
@@ -208,7 +214,6 @@ const API = (() => {
     window.addEventListener('beforeunload', () => disconnect());
 
     return {
-        setBaseUrl,
         getBaseUrl,
         on,
         checkHealth,
@@ -216,6 +221,9 @@ const API = (() => {
         getHistory,
         getCameraStatus,
         ackAlert,
+        getSessions,
+        getDailyReportPdfUrl,
+        getSessionPdfUrl,
         connect,
         disconnect,
         isConnected,
