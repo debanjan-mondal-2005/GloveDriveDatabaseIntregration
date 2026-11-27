@@ -149,7 +149,8 @@ const Camera = (() => {
         _inFlight = true;
 
         const baseUrl = API.getBaseUrl();
-        const frameUrl = `${baseUrl}/latest.jpg?t=${Date.now()}`;
+        const tok = API.getToken ? API.getToken() : null;
+        const frameUrl = `${baseUrl}/latest.jpg?t=${Date.now()}${tok ? '&token=' + encodeURIComponent(tok) : ''}`;
         const loader = new Image();
 
         loader.onload = () => {

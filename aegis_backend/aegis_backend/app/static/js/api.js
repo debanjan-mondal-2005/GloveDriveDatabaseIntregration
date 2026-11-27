@@ -14,6 +14,7 @@
 
 const API = (() => {
     const MAX_BACKOFF_MS = 30000;
+    const AUTH_KEY = 'aegis_auth_session';
 
     // Clear any stale saved endpoint override from earlier versions
     try {
@@ -27,13 +28,70 @@ const API = (() => {
     let _reconnectTimer = null;
     let _backoffMs = 1000;
     let _intentionalClose = false;
+    let _session = _loadStoredSession();
 
     const _listeners = {
         snapshot: [],
         wsOpen: [],
         wsClose: [],
         error: [],
+        authExpired: [],
     };
+
+    function _loadStoredSession() {
+        try {
+            const raw = localStorage.getItem(AUTH_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || !parsed.token) return null;
+            if (parsed.expires_at && parsed.expires_at * 1000 <= Date.now()) {
+                localStorage.removeItem(AUTH_KEY);
+                return null;
+            }
+            return parsed;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function getSession() {
+        return _session;
+    }
+
+    function getToken() {
+        return _session ? _session.token : null;
+    }
+
+    function setSession(data) {
+        if (!data || !data.token) return;
+        _session = {
+            token: data.token,
+            expires_at: data.expires_at,
+            user: data.user || null,
+        };
+        try {
+            localStorage.setItem(AUTH_KEY, JSON.stringify(_session));
+        } catch (_) {
+            // ignore
+        }
+    }
+
+    function clearSession() {
+        _session = null;
+        try {
+            localStorage.removeItem(AUTH_KEY);
+        } catch (_) {
+            // ignore
+        }
+    }
+
+    function authHeaders(extra = {}) {
+        const h = { ...extra };
+        if (_session && _session.token) {
+            h.Authorization = `Bearer ${_session.token}`;
+        }
+        return h;
+    }
 
     function getBaseUrl() {
         return _baseUrl;
@@ -55,32 +113,99 @@ const API = (() => {
         });
     }
 
-    async function fetchJSON(path, options = {}) {
+    async function fetchJSON(path, options = {}, { skipAuthEvent = false } = {}) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
         try {
             const response = await fetch(`${_baseUrl}${path}`, {
                 ...options,
+                credentials: 'same-origin',
+                headers: authHeaders(options.headers || {}),
                 signal: controller.signal,
             });
             // Read body ONCE — either as error detail or as JSON result
             const text = await response.text();
+            let parsed = null;
+            try { parsed = text ? JSON.parse(text) : null; } catch (_) {}
+
             if (!response.ok) {
-                let detail = '';
-                try { const j = JSON.parse(text); detail = j.detail || j.message || ''; } catch (_) {}
-                throw new Error(`HTTP ${response.status}${detail ? ': ' + detail : ''}`);
+                if (response.status === 401 && !skipAuthEvent) {
+                    clearSession();
+                    _emit('authExpired', { message: (parsed && parsed.detail) || 'Session expired' });
+                }
+                const detail = (parsed && (parsed.detail || parsed.message)) || '';
+                const err = new Error(detail || `HTTP ${response.status}`);
+                err.status = response.status;
+                err.data = parsed;
+                throw err;
             }
-            try {
-                return JSON.parse(text);
-            } catch (_) {
+            if (parsed === null && text) {
                 throw new Error('Backend returned non-JSON response');
             }
+            return parsed;
         } catch (err) {
-            if (err.name === 'AbortError') throw new Error('Request timed out — is the backend reachable at ' + _baseUrl + '?');
+            if (err.name === 'AbortError') throw new Error('Request timed out — please try again.');
             throw err;
         } finally {
             clearTimeout(timeoutId);
         }
+    }
+
+    function getAuthConfig() {
+        return fetchJSON('/api/auth/config', {}, { skipAuthEvent: true });
+    }
+
+    function getAuthMe() {
+        return fetchJSON('/api/auth/me', {}, { skipAuthEvent: true });
+    }
+
+    function signup(name, email, password) {
+        return fetchJSON('/api/auth/signup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, email, password }),
+        }, { skipAuthEvent: true });
+    }
+
+    function verifyOtp(email, otp) {
+        return fetchJSON('/api/auth/verify-otp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, otp }),
+        }, { skipAuthEvent: true });
+    }
+
+    function resendOtp(email) {
+        return fetchJSON('/api/auth/resend-otp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email }),
+        }, { skipAuthEvent: true });
+    }
+
+    function login(email, password) {
+        return fetchJSON('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password }),
+        }, { skipAuthEvent: true });
+    }
+
+    function googleAuth(credential) {
+        return fetchJSON('/api/auth/google', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credential }),
+        }, { skipAuthEvent: true });
+    }
+
+    async function logout() {
+        try {
+            await fetchJSON('/api/auth/logout', { method: 'POST' }, { skipAuthEvent: true });
+        } catch (_) {
+            // always clear client state
+        }
+        clearSession();
     }
 
     function checkHealth() {
@@ -125,7 +250,9 @@ const API = (() => {
         }
 
         _intentionalClose = false;
-        const wsUrl = `${_baseUrl.replace(/^http/, 'ws')}/ws/dashboard`;
+        const tok = getToken();
+        const q = tok ? `?token=${encodeURIComponent(tok)}` : '';
+        const wsUrl = `${_baseUrl.replace(/^http/, 'ws')}/ws/dashboard${q}`;
 
         try {
             _ws = new WebSocket(wsUrl);
@@ -153,6 +280,12 @@ const API = (() => {
             }
             if (!data || typeof data !== 'object') return;
             if (data.error) {
+                if (data.code === 401) {
+                    disconnect();
+                    clearSession();
+                    _emit('authExpired', { message: data.error });
+                    return;
+                }
                 _emit('error', new Error(data.error));
                 return;
             }
@@ -215,6 +348,19 @@ const API = (() => {
 
     return {
         getBaseUrl,
+        getSession,
+        getToken,
+        setSession,
+        clearSession,
+        authHeaders,
+        getAuthConfig,
+        getAuthMe,
+        signup,
+        verifyOtp,
+        resendOtp,
+        login,
+        googleAuth,
+        logout,
         on,
         checkHealth,
         getStatus,

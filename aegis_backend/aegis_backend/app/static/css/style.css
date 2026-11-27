@@ -689,12 +689,44 @@ body {
     justify-content: center;
     align-items: center;
     position: relative;
-    min-height: 300px;
+    min-height: 330px;
     overflow: hidden;
     border-radius: 12px;
-    background: radial-gradient(ellipse at center, rgba(0, 240, 255, 0.05) 0%, rgba(6, 9, 17, 0.45) 75%);
-    border: 1px solid rgba(0, 240, 255, 0.08);
-    perspective: 700px;
+    background: radial-gradient(ellipse at center, rgba(0, 240, 255, 0.08) 0%, rgba(4, 7, 15, 0.88) 78%);
+    border: 1px solid rgba(0, 240, 255, 0.16);
+    box-shadow: inset 0 0 36px rgba(0, 240, 255, 0.06);
+    perspective: 720px;
+}
+
+.dash-scene-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.dash-cam-rig {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 330px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2;
+    pointer-events: none;
+    will-change: transform;
+}
+
+.dash-car-mover {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    will-change: transform;
 }
 
 /* Holographic Speed Track Floor */
@@ -822,12 +854,11 @@ body {
 
 .vehicle-svg-wrapper {
     position: relative;
-    width: 175px;
-    height: 275px;
+    width: 146px;
+    height: 228px;
     display: flex;
     justify-content: center;
     align-items: center;
-    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
     z-index: 2;
 }
 
@@ -870,11 +901,11 @@ body {
 
 .wheel-steer-fl {
     transform-origin: 32px 81px;
-    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
 }
 .wheel-steer-fr {
     transform-origin: 168px 81px;
-    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
 }
 
 .headlight-beam,
@@ -908,67 +939,46 @@ body {
 }
 
 /* FORWARD */
-.vehicle-svg-wrapper[data-motion="forward"] {
-    animation: vehicleDriveFwd 0.55s ease-in-out infinite alternate;
-}
 .vehicle-svg-wrapper[data-motion="forward"] .sonar-wave {
     animation: sonarPulse 1.1s infinite ease-out;
 }
 .vehicle-svg-wrapper[data-motion="forward"] .sonar-2 { animation-delay: 0.2s; }
 .vehicle-svg-wrapper[data-motion="forward"] .sonar-3 { animation-delay: 0.4s; }
-.vehicle-svg-wrapper[data-motion="forward"] .wheel {
-    animation: wheelSpinFwd var(--wheel-dur, 0.28s) linear infinite;
-}
 .vehicle-svg-wrapper[data-motion="forward"] .headlight-beam {
-    opacity: 0.9;
+    opacity: 0.92;
 }
 .vehicle-svg-wrapper[data-motion="forward"] .exhaust-streak {
     opacity: 0.85;
     animation: exhaustFlame 0.3s ease-in-out infinite alternate;
 }
 .vehicle-svg-wrapper[data-motion="forward"] .aero-streak {
-    opacity: 0.45;
+    opacity: 0.48;
     stroke-dasharray: 18 22;
-    animation: aeroFlowFwd var(--drive-dur, 0.45s) linear infinite;
 }
 .vehicle-svg-wrapper[data-motion="forward"] .headlight-l,
 .vehicle-svg-wrapper[data-motion="forward"] .headlight-r {
     filter: drop-shadow(0 0 10px #00f0ff);
 }
 .vehicle-svg-wrapper[data-motion="forward"] .vehicle-topdown-svg {
-    filter: drop-shadow(0 6px 24px rgba(0, 240, 255, 0.4));
+    filter: drop-shadow(0 6px 24px rgba(0, 240, 255, 0.42));
 }
 
 /* BACKWARD */
-.vehicle-svg-wrapper[data-motion="backward"] {
-    animation: vehicleDriveRev 0.6s ease-in-out infinite alternate;
-}
-.vehicle-svg-wrapper[data-motion="backward"] .wheel {
-    animation: wheelSpinRev var(--wheel-dur, 0.28s) linear infinite;
-}
 .vehicle-svg-wrapper[data-motion="backward"] .aero-streak {
-    opacity: 0.35;
+    opacity: 0.38;
     stroke-dasharray: 14 24;
-    animation: aeroFlowRev var(--drive-dur, 0.55s) linear infinite;
 }
 .vehicle-svg-wrapper[data-motion="backward"] .taillight-beam {
-    opacity: 0.9;
+    opacity: 0.92;
 }
 .vehicle-svg-wrapper[data-motion="backward"] .taillight {
     filter: drop-shadow(0 0 14px #ef4444);
 }
 .vehicle-svg-wrapper[data-motion="backward"] .vehicle-topdown-svg {
-    filter: drop-shadow(0 -4px 22px rgba(239, 68, 68, 0.35));
+    filter: drop-shadow(0 -4px 22px rgba(239, 68, 68, 0.38));
 }
 
 /* LEFT */
-.vehicle-svg-wrapper[data-motion="left"] {
-    transform: rotate(-9deg) translateX(-6px);
-}
-.vehicle-svg-wrapper[data-motion="left"] .wheel-steer-fl,
-.vehicle-svg-wrapper[data-motion="left"] .wheel-steer-fr {
-    transform: rotate(-22deg);
-}
 .vehicle-svg-wrapper[data-motion="left"] .turn-arc-left {
     opacity: 0.95;
     animation: dashFlow 0.5s linear infinite;
@@ -978,23 +988,8 @@ body {
     filter: drop-shadow(0 0 6px #f59e0b);
     animation: turnSignalBlink 0.45s ease-in-out infinite alternate;
 }
-.vehicle-svg-wrapper[data-motion="left"] .wheel-fl,
-.vehicle-svg-wrapper[data-motion="left"] .wheel-rl {
-    animation: wheelSpinRev 0.35s linear infinite;
-}
-.vehicle-svg-wrapper[data-motion="left"] .wheel-fr,
-.vehicle-svg-wrapper[data-motion="left"] .wheel-rr {
-    animation: wheelSpinFwd 0.35s linear infinite;
-}
 
 /* RIGHT */
-.vehicle-svg-wrapper[data-motion="right"] {
-    transform: rotate(9deg) translateX(6px);
-}
-.vehicle-svg-wrapper[data-motion="right"] .wheel-steer-fl,
-.vehicle-svg-wrapper[data-motion="right"] .wheel-steer-fr {
-    transform: rotate(22deg);
-}
 .vehicle-svg-wrapper[data-motion="right"] .turn-arc-right {
     opacity: 0.95;
     animation: dashFlow 0.5s linear infinite;
@@ -1004,19 +999,8 @@ body {
     filter: drop-shadow(0 0 6px #f59e0b);
     animation: turnSignalBlink 0.45s ease-in-out infinite alternate;
 }
-.vehicle-svg-wrapper[data-motion="right"] .wheel-fl,
-.vehicle-svg-wrapper[data-motion="right"] .wheel-rl {
-    animation: wheelSpinFwd 0.35s linear infinite;
-}
-.vehicle-svg-wrapper[data-motion="right"] .wheel-fr,
-.vehicle-svg-wrapper[data-motion="right"] .wheel-rr {
-    animation: wheelSpinRev 0.35s linear infinite;
-}
 
 /* STOP / IDLE */
-.vehicle-svg-wrapper[data-motion="stop"] {
-    animation: vehicleIdleHover 3s ease-in-out infinite alternate;
-}
 .vehicle-svg-wrapper[data-motion="stop"] .taillight,
 .vehicle-svg-wrapper.vehicle-blocked .taillight {
     filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.85));
@@ -2351,6 +2335,642 @@ body {
 @keyframes slideInRightFade {
     from { opacity: 0; transform: translateX(14px); }
     to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ==============================================================================
+   SPLIT-SCREEN AUTHENTICATION PORTAL & USER SESSION CONTROLS
+   ============================================================================== */
+
+.auth-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    min-height: 100vh;
+    background: var(--bg-main);
+    overflow-x: hidden;
+    overflow-y: auto;
+    animation: fadeIn 0.35s ease;
+}
+
+/* Left Panel: Animated Car-Themed Showcase */
+.auth-visual-panel {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    background: radial-gradient(circle at 30% 25%, rgba(0, 240, 255, 0.1) 0%, transparent 55%),
+                radial-gradient(circle at 75% 80%, rgba(139, 92, 246, 0.12) 0%, transparent 55%),
+                #050811;
+    border-right: 1px solid rgba(0, 240, 255, 0.14);
+}
+
+.auth-bg-grid {
+    position: absolute;
+    inset: -60px 0 0 0;
+    background-image:
+        linear-gradient(to right, rgba(0, 240, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 240, 255, 0.05) 1px, transparent 1px);
+    background-size: 38px 38px;
+    pointer-events: none;
+    animation: authBgScroll 2.2s linear infinite;
+    will-change: transform;
+}
+
+.auth-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(60px);
+    pointer-events: none;
+    animation: glowBreath 5s ease-in-out infinite alternate;
+}
+.auth-orb-cyan {
+    width: 280px;
+    height: 280px;
+    top: -60px;
+    left: -60px;
+    background: rgba(0, 240, 255, 0.16);
+}
+.auth-orb-violet {
+    width: 260px;
+    height: 260px;
+    bottom: -60px;
+    right: -40px;
+    background: rgba(139, 92, 246, 0.18);
+}
+
+.auth-visual-inner {
+    position: relative;
+    z-index: 2;
+    max-width: 520px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+}
+
+.auth-brand-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.auth-brand-title {
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--text-primary);
+}
+
+.auth-brand-sub {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: var(--accent-cyan);
+}
+
+.auth-car-showcase {
+    position: relative;
+    height: 340px;
+    border-radius: 16px;
+    background: radial-gradient(ellipse at center, rgba(0, 240, 255, 0.1) 0%, rgba(4, 7, 15, 0.96) 78%);
+    border: 1px solid rgba(0, 240, 255, 0.24);
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.65), inset 0 0 42px rgba(0, 240, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    perspective: 720px;
+}
+
+.auth-scene-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.auth-cam-rig {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    pointer-events: none;
+    will-change: transform;
+}
+
+.auth-car-float {
+    position: relative;
+    width: 126px;
+    height: 202px;
+    z-index: 2;
+    will-change: transform;
+}
+
+.auth-car-svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    filter: drop-shadow(0 12px 28px rgba(0, 240, 255, 0.45));
+}
+
+.auth-steer-fl {
+    transform-origin: 32px 81px;
+    will-change: transform;
+}
+.auth-steer-fr {
+    transform-origin: 168px 81px;
+    will-change: transform;
+}
+
+.auth-wheel-tread {
+    stroke-dasharray: 8 4;
+}
+
+.auth-headlight-led {
+    filter: drop-shadow(0 0 8px #00f0ff);
+}
+
+.auth-aero-trail {
+    stroke-dasharray: 22 24;
+}
+
+.auth-sonar-sweep {
+    transform-origin: 100px 48px;
+    will-change: transform;
+}
+
+.auth-float-badge {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    background: rgba(10, 15, 29, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-primary);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    z-index: 3;
+    animation: iconFloat 2.4s ease-in-out infinite alternate;
+}
+.badge-tl { top: 14px; left: 14px; }
+.badge-tr { top: 14px; right: 14px; animation-delay: 0.4s; }
+.badge-bl { bottom: 14px; left: 14px; animation-delay: 0.8s; }
+.badge-br { bottom: 14px; right: 14px; animation-delay: 1.2s; }
+
+.auth-hero-copy h2 {
+    font-family: var(--font-heading);
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: 10px;
+    background: linear-gradient(90deg, #f8fafc, #00f0ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.auth-hero-copy p {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+/* Right Panel: Auth Forms */
+.auth-form-panel {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 36px 28px;
+    background: radial-gradient(circle at 80% 20%, rgba(0, 119, 254, 0.08) 0%, transparent 50%),
+                var(--bg-main);
+}
+
+.auth-card {
+    width: 100%;
+    min-width: 0;
+    max-width: 430px;
+    background: rgba(13, 20, 38, 0.85);
+    border: 1px solid rgba(0, 240, 255, 0.2);
+    border-radius: 16px;
+    padding: 28px 30px;
+    backdrop-filter: blur(16px);
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.55), 0 0 32px rgba(0, 240, 255, 0.08);
+    overflow: hidden;
+    animation: cardSlideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.auth-card-head h1 {
+    font-family: var(--font-heading);
+    font-size: 24px;
+    font-weight: 700;
+    margin: 10px 0 4px 0;
+}
+
+.auth-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 4px;
+    margin: 18px 0 16px 0;
+}
+
+.auth-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 9px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.auth-tab:hover {
+    color: var(--text-primary);
+}
+
+.auth-tab.active {
+    background: rgba(0, 240, 255, 0.15);
+    color: var(--accent-cyan);
+    box-shadow: inset 0 0 0 1px rgba(0, 240, 255, 0.32);
+}
+
+.auth-feedback {
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    margin-bottom: 14px;
+    border: 1px solid transparent;
+    animation: fadeIn 0.2s ease;
+}
+.auth-feedback.ok {
+    background: rgba(16, 185, 129, 0.14);
+    border-color: rgba(16, 185, 129, 0.38);
+    color: #10b981;
+}
+.auth-feedback.err {
+    background: rgba(239, 68, 68, 0.14);
+    border-color: rgba(239, 68, 68, 0.38);
+    color: #f87171;
+}
+.auth-feedback.info {
+    background: rgba(0, 240, 255, 0.1);
+    border-color: rgba(0, 240, 255, 0.3);
+    color: var(--accent-cyan);
+}
+
+.auth-form {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.auth-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.auth-field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.auth-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.auth-input {
+    width: 100%;
+    background: rgba(3, 7, 18, 0.72);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 10px 13px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: var(--font-body);
+    outline: none;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.auth-input-wrap .auth-input {
+    padding-right: 58px;
+}
+
+.auth-input:focus {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 0 3px rgba(0, 240, 255, 0.12);
+}
+
+.auth-eye-btn {
+    position: absolute;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    padding: 3px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.auth-eye-btn:hover {
+    color: var(--accent-cyan);
+    border-color: rgba(0, 240, 255, 0.35);
+}
+
+.auth-submit-btn {
+    margin-top: 4px;
+    background: linear-gradient(135deg, #00f0ff, #0077fe);
+    color: #030712;
+    border: none;
+    border-radius: 9px;
+    padding: 11px 16px;
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(0, 240, 255, 0.28);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), opacity var(--transition-fast);
+}
+
+.auth-submit-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 28px rgba(0, 240, 255, 0.42);
+}
+
+.auth-submit-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 4px 0;
+    color: var(--text-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.auth-divider::before,
+.auth-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border-subtle);
+}
+
+.google-btn-slot {
+    display: flex;
+    justify-content: center;
+    min-height: 42px;
+}
+
+.otp-info-box {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(0, 240, 255, 0.06);
+    border: 1px solid rgba(0, 240, 255, 0.2);
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.otp-inputs-group {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.otp-digit {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0;
+    height: 48px;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    background: rgba(3, 7, 18, 0.85);
+    border: 1px solid rgba(0, 240, 255, 0.25);
+    border-radius: 9px;
+    outline: none;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+
+.otp-digit:focus {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 14px rgba(0, 240, 255, 0.28);
+    transform: translateY(-1px);
+}
+
+.otp-actions-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+/* Dashboard Navbar User Profile & Logout */
+.user-profile-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px 4px 5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-subtle);
+}
+
+.user-avatar-badge {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+    color: #030712;
+    font-family: var(--font-heading);
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.user-avatar-badge img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.user-name-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    max-width: 110px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.btn-logout {
+    background: rgba(239, 68, 68, 0.14);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    color: #f87171;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.btn-logout:hover {
+    background: #ef4444;
+    color: #ffffff;
+}
+
+@keyframes authServoSweep {
+    0%   { transform: rotate(-45deg); }
+    100% { transform: rotate(45deg); }
+}
+
+@keyframes authBgScroll {
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(0, 38px, 0); }
+}
+
+@keyframes authRoadGridMove {
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(0, 38px, 0); }
+}
+
+@keyframes authCamFollow {
+    0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+    25%      { transform: translate3d(-8px, 3px, 0) scale(1.02) rotate(-0.8deg); }
+    50%      { transform: translate3d(0, -4px, 0) scale(1.03); }
+    75%      { transform: translate3d(8px, 3px, 0) scale(1.02) rotate(0.8deg); }
+}
+
+@keyframes authRoverWeave {
+    0%   { transform: translate3d(0px, 0px, 0) rotate(0deg); }
+    14%  { transform: translate3d(8px, -7px, 0) rotate(4deg); }
+    25%  { transform: translate3d(28px, -4px, 0) rotate(8deg); }
+    38%  { transform: translate3d(14px, -9px, 0) rotate(3deg); }
+    50%  { transform: translate3d(0px, -12px, 0) rotate(0deg); }
+    64%  { transform: translate3d(-8px, -7px, 0) rotate(-4deg); }
+    75%  { transform: translate3d(-28px, -4px, 0) rotate(-8deg); }
+    88%  { transform: translate3d(-14px, -9px, 0) rotate(-3deg); }
+    100% { transform: translate3d(0px, 0px, 0) rotate(0deg); }
+}
+
+@keyframes authWheelSteer {
+    0%, 8%, 42%, 58%, 92%, 100% { transform: rotate(0deg); }
+    18%, 32%                    { transform: rotate(20deg); }
+    68%, 82%                    { transform: rotate(-20deg); }
+}
+
+@keyframes authTurnRightFlash {
+    0%, 11%, 39%, 100% { opacity: 0; }
+    16%, 24%, 32%      { opacity: 1; filter: drop-shadow(0 0 8px #f59e0b); }
+    20%, 28%           { opacity: 0.25; }
+}
+
+@keyframes authTurnLeftFlash {
+    0%, 61%, 89%, 100% { opacity: 0; }
+    66%, 74%, 82%      { opacity: 1; filter: drop-shadow(0 0 8px #f59e0b); }
+    70%, 78%           { opacity: 0.25; }
+}
+
+@keyframes authBeamPulse {
+    from { opacity: 0.72; }
+    to   { opacity: 1; }
+}
+
+@keyframes authRadarRingPulse {
+    0%   { transform: scale(0.5); opacity: 0.75; }
+    100% { transform: scale(3.5); opacity: 0; }
+}
+
+@keyframes authParticleFall {
+    0%   { transform: translate3d(0, -20px, 0); opacity: 0; }
+    15%  { opacity: 0.85; }
+    85%  { opacity: 0.85; }
+    100% { transform: translate3d(0, 380px, 0); opacity: 0; }
+}
+
+@media (max-width: 960px) {
+    .auth-screen {
+        grid-template-columns: 1fr;
+    }
+    .auth-visual-panel {
+        padding: 28px 20px;
+        border-right: none;
+        border-bottom: 1px solid rgba(0, 240, 255, 0.14);
+    }
+    .auth-car-showcase {
+        height: 220px;
+    }
+    .auth-car-float {
+        width: 120px;
+        height: 190px;
+    }
+}
+
+@media (max-width: 480px) {
+    .auth-form-panel {
+        padding: 20px 14px;
+    }
+    .auth-card {
+        padding: 22px 16px;
+    }
+    .otp-inputs-group {
+        gap: 6px;
+    }
+    .otp-digit {
+        height: 42px;
+        font-size: 17px;
+    }
 }
 
 /* Prefers-reduced-motion override */

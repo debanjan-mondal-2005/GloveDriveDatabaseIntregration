@@ -63,6 +63,21 @@
     let _prevMainOnline = null;
     let _lastSessionRefreshMs = 0;
     let _ctrlFeedbackTimer = null;
+    let _expiryTimer = null;
+    let _pendingOtpEmail = '';
+    let _otpResendCooldownTimer = null;
+    let _dashboardStarted = false;
+    let _authAnimRaf = null;
+    let _dashAnimRaf = null;
+    const _dashSceneState = {
+        motion: 'stop',
+        blocked: false,
+        estop: false,
+        speedPct: 0,
+        speedAPct: 0,
+        speedBPct: 0,
+        near: false,
+    };
     const _ctrlDragging = { speedA: false, speedB: false, servo: false, stopCm: false };
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -72,6 +87,7 @@
         _initControls();
         _initSessionHistory();
         _initInteractiveEffects();
+        _initAuth();
 
         Charts.init();
         Camera.init();
@@ -79,16 +95,19 @@
         // Render initial offline state (including 3 red node dots)
         _setDisconnectedState();
 
-        // Wire API listeners and connect immediately to real backend
+        // Wire API listeners
         API.on('wsOpen', _onWsOpen);
         API.on('wsClose', _onWsClose);
         API.on('snapshot', _onSnapshot);
+        API.on('authExpired', err => {
+            _exitToAuth(err && err.message ? err.message : 'Session expired. Please sign in again.');
+        });
         API.on('error', err => {
             console.warn('[Dashboard]', err.message);
             _showControlFeedback(err.message, false);
         });
 
-        _bootstrapBackend();
+        _checkAuthOnStartup();
     });
 
     async function _bootstrapBackend() {
@@ -366,6 +385,13 @@
         _setText('badge-motor-b-status', speedBPct !== null ? `${speedBPct}% LIMIT` : 'CHANNEL B');
 
         _mainOnline = true;
+        _dashSceneState.motion = motion || 'stop';
+        _dashSceneState.blocked = blocked;
+        _dashSceneState.estop = estop;
+        _dashSceneState.speedAPct = speedAPct !== null ? speedAPct : 65;
+        _dashSceneState.speedBPct = speedBPct !== null ? speedBPct : 65;
+        _dashSceneState.speedPct = isMoving ? ((_dashSceneState.speedAPct + _dashSceneState.speedBPct) / 2) : 0;
+        _dashSceneState.near = isNear;
         _syncControlsFromTelemetry(mainData, estop, true);
         if (_prevMainOnline === false) {
             _loadSessionHistory();
@@ -678,6 +704,13 @@
             servoBeam.style.opacity = '0.25';
         }
         _syncControlsFromTelemetry({}, estop, false);
+        _dashSceneState.motion = 'stop';
+        _dashSceneState.blocked = false;
+        _dashSceneState.estop = estop;
+        _dashSceneState.speedAPct = 0;
+        _dashSceneState.speedBPct = 0;
+        _dashSceneState.speedPct = 0;
+        _dashSceneState.near = false;
         if (_prevMainOnline === true) {
             _loadSessionHistory();
         }
@@ -1090,7 +1123,6 @@
                 );
             });
         }
-        _loadSessionHistory();
     }
 
     async function _loadSessionHistory() {
@@ -1200,7 +1232,15 @@
             btn.textContent = 'Generating…';
         }
         try {
-            const resp = await fetch(url);
+            const resp = await fetch(url, {
+                headers: API.authHeaders(),
+                credentials: 'same-origin',
+            });
+            if (resp.status === 401) {
+                API.clearSession();
+                _exitToAuth('Session expired. Please sign in again.');
+                return;
+            }
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const blob = await resp.blob();
             const objUrl = URL.createObjectURL(blob);
@@ -1220,6 +1260,983 @@
                 btn.innerHTML = origHtml;
             }
         }
+    }
+
+    /* ── Authentication, Resend OTP, Google OAuth & Session Lifecycle ── */
+    function _initAuth() {
+        const tabLogin = document.getElementById('tab-login');
+        const tabSignup = document.getElementById('tab-signup');
+        const formLogin = document.getElementById('form-login');
+        const formSignup = document.getElementById('form-signup');
+        const formOtp = document.getElementById('form-otp');
+        const btnLogout = document.getElementById('btn-logout');
+
+        if (tabLogin) tabLogin.addEventListener('click', () => _setAuthMode('login'));
+        if (tabSignup) tabSignup.addEventListener('click', () => _setAuthMode('signup'));
+
+        document.querySelectorAll('[data-toggle-pw]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const inp = document.getElementById(btn.dataset.togglePw);
+                if (!inp) return;
+                const isPw = inp.type === 'password';
+                inp.type = isPw ? 'text' : 'password';
+                btn.textContent = isPw ? 'Hide' : 'Show';
+            });
+        });
+
+        // OTP 6-digit boxes auto-advance & paste
+        const otpInputs = Array.from(document.querySelectorAll('#otp-inputs-group .otp-digit'));
+        otpInputs.forEach((inp, idx) => {
+            inp.addEventListener('input', () => {
+                inp.value = inp.value.replace(/\D/g, '').slice(0, 1);
+                if (inp.value && idx < otpInputs.length - 1) {
+                    otpInputs[idx + 1].focus();
+                }
+            });
+            inp.addEventListener('keydown', e => {
+                if (e.key === 'Backspace' && !inp.value && idx > 0) {
+                    otpInputs[idx - 1].focus();
+                }
+            });
+            inp.addEventListener('paste', e => {
+                const pasted = (e.clipboardData?.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+                if (!pasted) return;
+                e.preventDefault();
+                otpInputs.forEach((box, i) => { box.value = pasted[i] || ''; });
+                const nextIdx = Math.min(pasted.length, otpInputs.length - 1);
+                otpInputs[nextIdx].focus();
+            });
+        });
+
+        // Login form submit
+        if (formLogin) {
+            formLogin.addEventListener('submit', async e => {
+                e.preventDefault();
+                const email = (document.getElementById('login-email')?.value || '').trim();
+                const password = document.getElementById('login-password')?.value || '';
+                const btn = document.getElementById('btn-login-submit');
+                _showAuthFeedback('', null);
+                _setAuthBtnBusy(btn, true, 'Signing in…');
+                try {
+                    const res = await API.login(email, password);
+                    _completeAuthSession(res);
+                } catch (err) {
+                    if (err.data && err.data.requires_otp) {
+                        _enterOtpStep(err.data.email || email, err.message, true);
+                    } else {
+                        _showAuthFeedback(err.message || 'Sign in failed', 'err');
+                    }
+                } finally {
+                    _setAuthBtnBusy(btn, false, 'Sign In to Dashboard');
+                }
+            });
+        }
+
+        // Signup form submit
+        if (formSignup) {
+            formSignup.addEventListener('submit', async e => {
+                e.preventDefault();
+                const name = (document.getElementById('signup-name')?.value || '').trim();
+                const email = (document.getElementById('signup-email')?.value || '').trim();
+                const pw = document.getElementById('signup-password')?.value || '';
+                const confirm = document.getElementById('signup-confirm')?.value || '';
+                const btn = document.getElementById('btn-signup-submit');
+                _showAuthFeedback('', null);
+
+                if (name.length < 2) {
+                    _showAuthFeedback('Please enter your full name.', 'err');
+                    return;
+                }
+                if (pw.length < 6) {
+                    _showAuthFeedback('Password must be at least 6 characters.', 'err');
+                    return;
+                }
+                if (pw !== confirm) {
+                    _showAuthFeedback('Passwords do not match.', 'err');
+                    return;
+                }
+
+                _setAuthBtnBusy(btn, true, 'Sending OTP…');
+                try {
+                    const res = await API.signup(name, email, pw);
+                    _enterOtpStep(res.email || email, res.message || 'Verification code sent to your email.', false);
+                } catch (err) {
+                    _showAuthFeedback(err.message || 'Could not create account', 'err');
+                } finally {
+                    _setAuthBtnBusy(btn, false, 'Create Account & Send OTP');
+                }
+            });
+        }
+
+        // OTP Verify submit
+        if (formOtp) {
+            formOtp.addEventListener('submit', async e => {
+                e.preventDefault();
+                const code = otpInputs.map(i => i.value.trim()).join('');
+                const btn = document.getElementById('btn-otp-submit');
+                if (code.length !== 6) {
+                    _showAuthFeedback('Please enter all 6 digits of the verification code.', 'err');
+                    return;
+                }
+                _setAuthBtnBusy(btn, true, 'Verifying…');
+                try {
+                    const res = await API.verifyOtp(_pendingOtpEmail, code);
+                    _completeAuthSession(res);
+                } catch (err) {
+                    _showAuthFeedback(err.message || 'Invalid verification code', 'err');
+                } finally {
+                    _setAuthBtnBusy(btn, false, 'Verify Code & Launch Dashboard');
+                }
+            });
+        }
+
+        // Resend & Back OTP buttons
+        const btnResend = document.getElementById('btn-otp-resend');
+        if (btnResend) {
+            btnResend.addEventListener('click', async () => {
+                if (!_pendingOtpEmail) return;
+                btnResend.disabled = true;
+                try {
+                    const res = await API.resendOtp(_pendingOtpEmail);
+                    _showAuthFeedback(res.message || 'New code sent.', 'ok');
+                    _startOtpResendCooldown(30);
+                } catch (err) {
+                    _showAuthFeedback(err.message || 'Failed to resend code', 'err');
+                    btnResend.disabled = false;
+                }
+            });
+        }
+        const btnBack = document.getElementById('btn-otp-back');
+        if (btnBack) {
+            btnBack.addEventListener('click', () => _setAuthMode('login'));
+        }
+
+        if (btnLogout) {
+            btnLogout.addEventListener('click', async () => {
+                await API.logout();
+                _exitToAuth('Signed out securely.');
+            });
+        }
+
+        _initGoogleAuthButtons();
+    }
+
+    async function _checkAuthOnStartup() {
+        try {
+            const me = await API.getAuthMe();
+            if (me && me.authenticated && me.user) {
+                const existing = API.getSession() || {};
+                if (existing.token) {
+                    API.setSession({ ...existing, user: me.user, expires_at: me.expires_at });
+                }
+                _enterDashboard(me.user, me.expires_at);
+                return;
+            }
+        } catch (_) {
+            API.clearSession();
+        }
+        _showAuthScreen();
+    }
+
+    async function _initGoogleAuthButtons() {
+        let cfg = null;
+        try {
+            cfg = await API.getAuthConfig();
+        } catch (_) {
+            return;
+        }
+        if (!cfg || !cfg.google_enabled || !cfg.google_client_id) return;
+
+        let attempts = 0;
+        const tryRender = () => {
+            if (window.google && window.google.accounts && window.google.accounts.id) {
+                window.google.accounts.id.initialize({
+                    client_id: cfg.google_client_id,
+                    callback: async resp => {
+                        if (!resp || !resp.credential) return;
+                        _showAuthFeedback('Verifying Google sign-in…', 'info');
+                        try {
+                            const sessionRes = await API.googleAuth(resp.credential);
+                            _completeAuthSession(sessionRes);
+                        } catch (err) {
+                            _showAuthFeedback(err.message || 'Google Sign-In failed', 'err');
+                        }
+                    },
+                });
+                ['google-btn-login', 'google-btn-signup'].forEach(slotId => {
+                    const el = document.getElementById(slotId);
+                    if (el && !el.hasChildNodes()) {
+                        window.google.accounts.id.renderButton(el, {
+                            theme: 'filled_black',
+                            size: 'large',
+                            shape: 'rectangular',
+                            text: 'continue_with',
+                            width: 340,
+                        });
+                    }
+                });
+                return;
+            }
+            attempts += 1;
+            if (attempts < 25) {
+                setTimeout(tryRender, 250);
+            } else {
+                const note = document.getElementById('google-fallback-note');
+                if (note) {
+                    note.textContent = 'Google Sign-In unavailable offline — use verified email & password.';
+                    note.classList.remove('hidden');
+                }
+            }
+        };
+        tryRender();
+    }
+
+    function _setAuthMode(mode) {
+        const tabLogin = document.getElementById('tab-login');
+        const tabSignup = document.getElementById('tab-signup');
+        const tabsBar = document.getElementById('auth-tabs');
+        const formLogin = document.getElementById('form-login');
+        const formSignup = document.getElementById('form-signup');
+        const formOtp = document.getElementById('form-otp');
+
+        _showAuthFeedback('', null);
+        if (formLogin) formLogin.classList.toggle('hidden', mode !== 'login');
+        if (formSignup) formSignup.classList.toggle('hidden', mode !== 'signup');
+        if (formOtp) formOtp.classList.toggle('hidden', mode !== 'otp');
+        if (tabsBar) tabsBar.classList.toggle('hidden', mode === 'otp');
+
+        if (tabLogin) tabLogin.classList.toggle('active', mode === 'login');
+        if (tabSignup) tabSignup.classList.toggle('active', mode === 'signup');
+
+        if (mode === 'login') {
+            _setText('auth-heading', 'Welcome Back');
+            _setText('auth-subheading', 'Sign in to access your rover telemetry & controls');
+        } else if (mode === 'signup') {
+            _setText('auth-heading', 'Create Operator Account');
+            _setText('auth-subheading', 'Verify your email via OTP or continue with Google');
+        } else {
+            _setText('auth-heading', 'Verify Your Email');
+            _setText('auth-subheading', 'Enter the 6-digit code sent to your inbox');
+        }
+    }
+
+    function _enterOtpStep(email, msg, isInfo) {
+        _pendingOtpEmail = email;
+        _setText('otp-email-label', email);
+        document.querySelectorAll('#otp-inputs-group .otp-digit').forEach(i => { i.value = ''; });
+        _setAuthMode('otp');
+        _showAuthFeedback(msg, isInfo ? 'info' : 'ok');
+        _startOtpResendCooldown(30);
+        const firstBox = document.querySelector('#otp-inputs-group .otp-digit');
+        if (firstBox) setTimeout(() => firstBox.focus(), 60);
+    }
+
+    function _startOtpResendCooldown(seconds) {
+        const btn = document.getElementById('btn-otp-resend');
+        if (!btn) return;
+        clearInterval(_otpResendCooldownTimer);
+        let rem = seconds;
+        btn.disabled = true;
+        btn.textContent = `Resend (${rem}s)`;
+        _otpResendCooldownTimer = setInterval(() => {
+            rem -= 1;
+            if (rem <= 0) {
+                clearInterval(_otpResendCooldownTimer);
+                btn.disabled = false;
+                btn.textContent = 'Resend Code';
+            } else {
+                btn.textContent = `Resend (${rem}s)`;
+            }
+        }, 1000);
+    }
+
+    function _showAuthFeedback(msg, type) {
+        const el = document.getElementById('auth-feedback');
+        if (!el) return;
+        if (!msg || !type) {
+            el.textContent = '';
+            el.className = 'auth-feedback hidden';
+            return;
+        }
+        el.textContent = msg;
+        el.className = `auth-feedback ${type}`;
+    }
+
+    function _setAuthBtnBusy(btn, busy, label) {
+        if (!btn) return;
+        btn.disabled = busy;
+        const sp = btn.querySelector('span');
+        if (sp) sp.textContent = label;
+    }
+
+    function _completeAuthSession(res) {
+        if (res && res.token) {
+            API.setSession(res);
+        }
+        _enterDashboard(res.user, res.expires_at);
+    }
+
+    function _enterDashboard(user, expiresAt) {
+        _stopAuthSceneAnimation();
+        const authEl = document.getElementById('auth-screen');
+        const appEl = document.getElementById('app-shell');
+        if (authEl) authEl.classList.add('hidden');
+        if (appEl) appEl.classList.remove('hidden');
+
+        if (user) {
+            const name = user.name || user.email || 'Operator';
+            _setText('nav-user-name', name);
+            const av = document.getElementById('nav-user-avatar');
+            if (av) {
+                if (user.avatar_url) {
+                    av.innerHTML = `<img src="${_esc(user.avatar_url)}" alt="">`;
+                } else {
+                    av.textContent = name.trim().charAt(0).toUpperCase() || 'U';
+                }
+            }
+        }
+
+        clearTimeout(_expiryTimer);
+        if (expiresAt) {
+            const msLeft = Math.max(0, expiresAt * 1000 - Date.now());
+            // Schedule automatic logout when token expires (cap at 24d setTimeout limit)
+            const delay = Math.min(msLeft, 2000000000);
+            _expiryTimer = setTimeout(() => {
+                API.clearSession();
+                _exitToAuth('Session expired. Please sign in again.');
+            }, delay);
+        }
+
+        if (!_dashboardStarted) {
+            _dashboardStarted = true;
+            _bootstrapBackend();
+            _loadSessionHistory();
+        } else {
+            _bootstrapBackend();
+            _loadSessionHistory();
+        }
+        Charts.refresh();
+        _startDashSceneAnimation();
+    }
+
+    function _showAuthScreen(noticeMsg) {
+        _stopDashSceneAnimation();
+        const authEl = document.getElementById('auth-screen');
+        const appEl = document.getElementById('app-shell');
+        if (appEl) appEl.classList.add('hidden');
+        if (authEl) authEl.classList.remove('hidden');
+        _setAuthMode('login');
+        if (noticeMsg) {
+            _showAuthFeedback(noticeMsg, 'info');
+        }
+        _startAuthSceneAnimation();
+    }
+
+    /* ── 60fps Left-Side Login Rover Physics & Canvas Scene ──── */
+    function _startAuthSceneAnimation() {
+        if (_authAnimRaf !== null) return;
+        const showcase = document.getElementById('auth-car-showcase');
+        const canvas = document.getElementById('auth-scene-canvas');
+        const camRig = document.getElementById('auth-cam-rig');
+        const carMover = document.getElementById('auth-car-mover');
+        if (!showcase || !canvas || !carMover) return;
+
+        const ctx = canvas.getContext('2d');
+        const steerFL = document.getElementById('auth-steer-fl');
+        const steerFR = document.getElementById('auth-steer-fr');
+        const turret = document.getElementById('auth-servo-turret');
+        const turnL = document.getElementById('auth-turn-l');
+        const turnR = document.getElementById('auth-turn-r');
+        const arcL = document.getElementById('auth-arc-l');
+        const arcR = document.getElementById('auth-arc-r');
+        const thrL = document.getElementById('auth-thruster-l');
+        const thrR = document.getElementById('auth-thruster-r');
+        const beamL = document.getElementById('auth-beam-l');
+        const beamR = document.getElementById('auth-beam-r');
+        const w1 = document.getElementById('auth-wave-1');
+        const w2 = document.getElementById('auth-wave-2');
+        const w3 = document.getElementById('auth-wave-3');
+        const treads = Array.from(document.querySelectorAll('.auth-wheel-tread'));
+        const trails = Array.from(document.querySelectorAll('.auth-aero-trail'));
+
+        const particles = Array.from({ length: 28 }, () => ({
+            x: Math.random(),
+            y: Math.random(),
+            speed: 0.45 + Math.random() * 0.9,
+            len: 10 + Math.random() * 22,
+            color: Math.random() > 0.72 ? 'rgba(139, 92, 246, 0.75)' : 'rgba(0, 240, 255, 0.72)',
+        }));
+
+        const radarBlips = [
+            { lane: -0.65, y: -0.2 },
+            { lane: 0.65, y: 0.35 },
+        ];
+        const trailHistory = [];
+        let roadScroll = 0;
+        let treadOffset = 0;
+        let lastTs = performance.now();
+        let startTs = lastTs;
+        let hudTick = 0;
+
+        function resizeCanvas() {
+            const rect = showcase.getBoundingClientRect();
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const w = Math.max(200, Math.round(rect.width));
+            const h = Math.max(160, Math.round(rect.height));
+            if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+                canvas.width = Math.round(w * dpr);
+                canvas.height = Math.round(h * dpr);
+            }
+            return { w, h, dpr };
+        }
+
+        function frame(now) {
+            const authScreen = document.getElementById('auth-screen');
+            if (!authScreen || authScreen.classList.contains('hidden')) {
+                _authAnimRaf = null;
+                return;
+            }
+
+            const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
+            lastTs = now;
+            const t = (now - startTs) / 1000;
+
+            const { w, h, dpr } = resizeCanvas();
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, w, h);
+
+            // Dynamic multi-harmonic driving path: rover weaves across lanes + surges forward!
+            const phase = t * 1.15;
+            const xAmp = Math.min(115, w * 0.25);
+            const yAmp = Math.min(46, h * 0.14);
+            const carX = Math.sin(phase) * xAmp + Math.sin(phase * 2.0) * (xAmp * 0.18);
+            const carY = -Math.sin(phase * 2.0) * yAmp - Math.cos(phase) * 10;
+
+            // True velocity derivatives for realistic steering angle & body tilt
+            const vx = Math.cos(phase) * xAmp * 1.15 + Math.cos(phase * 2.0) * (xAmp * 0.18) * 2.3;
+            const headingDeg = Math.max(-18, Math.min(18, vx * 0.11));
+            const steerDeg = Math.max(-26, Math.min(26, vx * 0.17));
+            const speedFactor = 1.0 + Math.max(0, -carY / Math.max(1, yAmp)) * 0.45;
+            const speedPct = Math.round(68 + speedFactor * 18);
+
+            // Scroll road & wheel treads continuously
+            roadScroll = (roadScroll + dt * 240 * speedFactor) % 52;
+            treadOffset = (treadOffset - dt * 110 * speedFactor) % 24;
+
+            // Chase-camera parallax offset
+            const camX = -carX * 0.18;
+            const camY = -carY * 0.12;
+            const camScale = 1.0 + (speedFactor - 1.0) * 0.04;
+            if (camRig) {
+                camRig.style.transform = `translate3d(${camX.toFixed(1)}px, ${camY.toFixed(1)}px, 0) scale(${camScale.toFixed(3)})`;
+            }
+
+            // 1. Draw moving perspective cyber grid + highway lanes on canvas
+            const centerX = w * 0.5 + camX * 1.15;
+            const roadHalfW = Math.min(160, w * 0.36);
+
+            // Background cyber grid lines
+            ctx.strokeStyle = 'rgba(0, 240, 255, 0.06)';
+            ctx.lineWidth = 1;
+            const gridSize = 38;
+            const gxOff = (camX * 0.5) % gridSize;
+            const gyOff = (roadScroll * 0.72) % gridSize;
+            ctx.beginPath();
+            for (let gx = gxOff; gx < w; gx += gridSize) {
+                ctx.moveTo(gx, 0);
+                ctx.lineTo(gx, h);
+            }
+            for (let gy = gyOff - gridSize; gy < h; gy += gridSize) {
+                ctx.moveTo(0, gy);
+                ctx.lineTo(w, gy);
+            }
+            ctx.stroke();
+
+            // Glowing highway edges (slight perspective convergence)
+            const topHalfW = roadHalfW * 0.78;
+            const botHalfW = roadHalfW * 1.12;
+            const drawEdge = (sign) => {
+                const grad = ctx.createLinearGradient(0, 0, 0, h);
+                grad.addColorStop(0, 'rgba(0, 240, 255, 0.05)');
+                grad.addColorStop(0.5, 'rgba(0, 240, 255, 0.75)');
+                grad.addColorStop(1, 'rgba(0, 240, 255, 0.15)');
+                ctx.strokeStyle = grad;
+                ctx.lineWidth = 2.2;
+                ctx.beginPath();
+                ctx.moveTo(centerX + sign * topHalfW, 0);
+                ctx.lineTo(centerX + sign * botHalfW, h);
+                ctx.stroke();
+            };
+            drawEdge(-1);
+            drawEdge(1);
+
+            // Moving dashed highway lane dividers
+            [-0.48, 0, 0.48].forEach(laneFrac => {
+                ctx.strokeStyle = laneFrac === 0 ? 'rgba(0, 240, 255, 0.58)' : 'rgba(56, 189, 248, 0.35)';
+                ctx.lineWidth = laneFrac === 0 ? 2.4 : 1.6;
+                ctx.setLineDash([22, 30]);
+                ctx.lineDashOffset = -roadScroll * 1.4;
+                ctx.beginPath();
+                ctx.moveTo(centerX + laneFrac * topHalfW, 0);
+                ctx.lineTo(centerX + laneFrac * botHalfW, h);
+                ctx.stroke();
+            });
+            ctx.setLineDash([]);
+
+            // 2. Dynamic sonar radar blips moving down road
+            radarBlips.forEach(b => {
+                b.y = (b.y + dt * 0.34 * speedFactor) % 1.25;
+                const by = b.y * h - 20;
+                const tY = Math.max(0, Math.min(1, by / h));
+                const curHalfW = topHalfW + (botHalfW - topHalfW) * tY;
+                const bx = centerX + b.lane * curHalfW;
+                const pulse = 0.55 + 0.45 * Math.sin(t * 7 + b.lane * 4);
+                ctx.beginPath();
+                ctx.arc(bx, by, 4 + pulse * 4, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(245, 158, 11, ${(0.75 - pulse * 0.4).toFixed(2)})`;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(bx, by, 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = '#f59e0b';
+                ctx.fill();
+            });
+
+            // 3. Speed particles flying past
+            particles.forEach(p => {
+                p.y += dt * p.speed * speedFactor;
+                if (p.y > 1.1) {
+                    p.y = -0.1;
+                    p.x = Math.random();
+                }
+                const px = p.x * w;
+                const py = p.y * h;
+                ctx.strokeStyle = p.color;
+                ctx.lineWidth = 1.6;
+                ctx.beginPath();
+                ctx.moveTo(px, py);
+                ctx.lineTo(px, py + p.len);
+                ctx.stroke();
+            });
+
+            // 4. Curved glowing tire motion trails behind the moving car
+            const absCarX = w * 0.5 + camX + carX;
+            const absCarY = h * 0.5 + camY + carY;
+            const rad = (headingDeg * Math.PI) / 180;
+            const rearOffset = 52;
+            const trackHalf = 30;
+            const rearCx = absCarX - Math.sin(rad) * rearOffset;
+            const rearCy = absCarY + Math.cos(rad) * rearOffset;
+            trailHistory.push({
+                lx: rearCx - Math.cos(rad) * trackHalf,
+                ly: rearCy - Math.sin(rad) * trackHalf,
+                rx: rearCx + Math.cos(rad) * trackHalf,
+                ry: rearCy + Math.sin(rad) * trackHalf,
+            });
+            if (trailHistory.length > 26) trailHistory.shift();
+            // Shift previous trail points backward with road speed so trails stream behind the rover
+            for (let i = 0; i < trailHistory.length - 1; i++) {
+                trailHistory[i].ly += dt * 210 * speedFactor;
+                trailHistory[i].ry += dt * 210 * speedFactor;
+            }
+            for (let i = 1; i < trailHistory.length; i++) {
+                const alpha = (i / trailHistory.length) * 0.52;
+                ctx.strokeStyle = `rgba(0, 240, 255, ${alpha.toFixed(2)})`;
+                ctx.lineWidth = 3.2;
+                ctx.beginPath();
+                ctx.moveTo(trailHistory[i - 1].lx, trailHistory[i - 1].ly);
+                ctx.lineTo(trailHistory[i].lx, trailHistory[i].ly);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(trailHistory[i - 1].rx, trailHistory[i - 1].ry);
+                ctx.lineTo(trailHistory[i].rx, trailHistory[i].ry);
+                ctx.stroke();
+            }
+
+            // 5. Expanding floor radar pulse ring centered under rover
+            const ringProg = (t * 0.6) % 1;
+            ctx.beginPath();
+            ctx.arc(absCarX, absCarY - 26, 24 + ringProg * 115, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(0, 240, 255, ${(0.45 * (1 - ringProg)).toFixed(2)})`;
+            ctx.lineWidth = 1.4;
+            ctx.stroke();
+
+            // 6. Apply real motion transform to the rover SVG + steering + wheels + servo + lights
+            carMover.style.transform = `translate3d(${carX.toFixed(1)}px, ${carY.toFixed(1)}px, 0) rotate(${headingDeg.toFixed(2)}deg)`;
+            if (steerFL) steerFL.style.transform = `rotate(${steerDeg.toFixed(1)}deg)`;
+            if (steerFR) steerFR.style.transform = `rotate(${steerDeg.toFixed(1)}deg)`;
+
+            const servoDeg = Math.sin(t * 2.1) * 42;
+            if (turret) turret.style.transform = `rotate(${servoDeg.toFixed(1)}deg)`;
+
+            treads.forEach(tr => { tr.style.strokeDashoffset = treadOffset.toFixed(1); });
+            trails.forEach(tr => { tr.style.strokeDashoffset = (treadOffset * 1.8).toFixed(1); });
+
+            // Turn signals + corner arcs illuminate smoothly when turning
+            const leftOp = steerDeg < -5 ? Math.min(1, (-steerDeg - 5) / 10) : 0;
+            const rightOp = steerDeg > 5 ? Math.min(1, (steerDeg - 5) / 10) : 0;
+            const blink = Math.sin(t * 14) > 0 ? 1 : 0.25;
+            if (turnL) turnL.setAttribute('opacity', (leftOp * blink).toFixed(2));
+            if (arcL) arcL.setAttribute('opacity', leftOp.toFixed(2));
+            if (turnR) turnR.setAttribute('opacity', (rightOp * blink).toFixed(2));
+            if (arcR) arcR.setAttribute('opacity', rightOp.toFixed(2));
+
+            // Headlight shimmer, thruster flicker, and cascading sonar waves
+            const beamOp = 0.78 + 0.22 * Math.sin(t * 4.5);
+            if (beamL) beamL.setAttribute('opacity', beamOp.toFixed(2));
+            if (beamR) beamR.setAttribute('opacity', beamOp.toFixed(2));
+            const thrLen = 320 + Math.sin(t * 28) * 14;
+            if (thrL) thrL.setAttribute('y2', thrLen.toFixed(1));
+            if (thrR) thrR.setAttribute('y2', (thrLen - Math.cos(t * 28) * 5).toFixed(1));
+
+            [w1, w2, w3].forEach((wv, idx) => {
+                if (!wv) return;
+                const p = (t * 1.4 + idx * 0.33) % 1;
+                wv.setAttribute('opacity', (Math.sin(p * Math.PI) * 0.9).toFixed(2));
+                wv.setAttribute('transform', `translate(0, ${(-p * 10).toFixed(1)})`);
+            });
+
+            // Update floating HUD telemetry badges ~6 times/sec
+            hudTick += dt;
+            if (hudTick >= 0.16) {
+                hudTick = 0;
+                _setText('auth-hud-speed', `DRV ${speedPct}%`);
+                _setText('auth-hud-sonar', `SONAR ${Math.round(90 + servoDeg)}°`);
+                _setText('auth-hud-steer', `HDG ${headingDeg >= 0 ? '+' : ''}${Math.round(headingDeg)}°`);
+            }
+
+            _authAnimRaf = requestAnimationFrame(frame);
+        }
+
+        _authAnimRaf = requestAnimationFrame(frame);
+    }
+
+    function _stopAuthSceneAnimation() {
+        if (_authAnimRaf !== null) {
+            cancelAnimationFrame(_authAnimRaf);
+            _authAnimRaf = null;
+        }
+    }
+
+    /* ── 60fps Dashboard Rover Physics & Telemetry-Driven Scene ─ */
+    function _startDashSceneAnimation() {
+        if (_dashAnimRaf !== null) return;
+        const stage = document.getElementById('vehicle-stage');
+        const canvas = document.getElementById('dash-scene-canvas');
+        const camRig = document.getElementById('dash-cam-rig');
+        const carMover = document.getElementById('dash-car-mover');
+        if (!stage || !canvas || !carMover) return;
+
+        const ctx = canvas.getContext('2d');
+        const steerFL = stage.querySelector('.wheel-steer-fl');
+        const steerFR = stage.querySelector('.wheel-steer-fr');
+        const wheelsLeft = [
+            stage.querySelector('.wheel-fl'),
+            stage.querySelector('.wheel-rl'),
+        ].filter(Boolean);
+        const wheelsRight = [
+            stage.querySelector('.wheel-fr'),
+            stage.querySelector('.wheel-rr'),
+        ].filter(Boolean);
+        const aeroStreaks = Array.from(stage.querySelectorAll('.aero-streak'));
+
+        const particles = Array.from({ length: 24 }, () => ({
+            x: Math.random(),
+            y: Math.random(),
+            speed: 0.45 + Math.random() * 0.85,
+            len: 9 + Math.random() * 18,
+            color: Math.random() > 0.7 ? 'rgba(139, 92, 246, 0.7)' : 'rgba(0, 240, 255, 0.7)',
+        }));
+
+        const trailHistory = [];
+        let curX = 0;
+        let curY = 0;
+        let curHeading = 0;
+        let curSteer = 0;
+        let curRoadSpeed = 0;
+        let roadScroll = 0;
+        let treadL = 0;
+        let treadR = 0;
+        let aeroOff = 0;
+        let lastTs = performance.now();
+        let startTs = lastTs;
+
+        function resizeCanvas() {
+            const rect = stage.getBoundingClientRect();
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const w = Math.max(200, Math.round(rect.width));
+            const h = Math.max(180, Math.round(rect.height));
+            if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+                canvas.width = Math.round(w * dpr);
+                canvas.height = Math.round(h * dpr);
+            }
+            return { w, h, dpr };
+        }
+
+        function frame(now) {
+            const appEl = document.getElementById('app-shell');
+            if (!appEl || appEl.classList.contains('hidden')) {
+                _dashAnimRaf = null;
+                return;
+            }
+
+            const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
+            lastTs = now;
+            const t = (now - startTs) / 1000;
+
+            // Skip drawing while switching to a non-overview tab
+            if (stage.offsetParent === null) {
+                _dashAnimRaf = requestAnimationFrame(frame);
+                return;
+            }
+
+            const { w, h, dpr } = resizeCanvas();
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, w, h);
+
+            const st = _dashSceneState;
+            const isForwardBlocked = st.motion === 'forward' && st.blocked;
+            const effMotion = (st.estop || isForwardBlocked) ? 'stop' : (st.motion || 'stop');
+            const speedNorm = Math.max(0.38, Math.min(1.35, (st.speedPct || 65) / 72));
+            const maxX = Math.min(84, w * 0.2);
+            const maxY = Math.min(48, h * 0.14);
+
+            // Compute target rover pose & velocity based strictly on telemetry command
+            let targetX = 0;
+            let targetY = 0;
+            let targetHeading = 0;
+            let targetSteer = 0;
+            let targetRoadSpeed = 0;
+            let treadRateL = 0;
+            let treadRateR = 0;
+
+            if (effMotion === 'forward') {
+                targetRoadSpeed = 240 * speedNorm;
+                targetX = Math.sin(t * 2.1) * Math.min(26, maxX * 0.32);
+                targetY = -maxY * 0.72 - Math.cos(t * 2.1) * 5;
+                targetHeading = Math.cos(t * 2.1) * 4.2;
+                targetSteer = targetHeading * 1.4;
+                treadRateL = -125 * speedNorm;
+                treadRateR = -125 * speedNorm;
+            } else if (effMotion === 'backward') {
+                targetRoadSpeed = -205 * speedNorm;
+                targetX = Math.sin(t * 1.8) * Math.min(20, maxX * 0.25);
+                targetY = maxY * 0.76 + Math.cos(t * 1.8) * 4;
+                targetHeading = Math.cos(t * 1.8) * 3.5;
+                targetSteer = -targetHeading * 1.4;
+                treadRateL = 110 * speedNorm;
+                treadRateR = 110 * speedNorm;
+            } else if (effMotion === 'left') {
+                targetRoadSpeed = 145 * speedNorm;
+                targetX = -maxX * 0.74;
+                targetY = -maxY * 0.28;
+                targetHeading = -18;
+                targetSteer = -26;
+                treadRateL = 68 * speedNorm;
+                treadRateR = -125 * speedNorm;
+            } else if (effMotion === 'right') {
+                targetRoadSpeed = 145 * speedNorm;
+                targetX = maxX * 0.74;
+                targetY = -maxY * 0.28;
+                targetHeading = 18;
+                targetSteer = 26;
+                treadRateL = -125 * speedNorm;
+                treadRateR = 68 * speedNorm;
+            }
+
+            // Smooth spring/exponential interpolation (snaps cleanly to 0 when stopped)
+            const lerp = 1 - Math.exp(-dt * 8.5);
+            const speedLerp = 1 - Math.exp(-dt * 7.0);
+            curX += (targetX - curX) * lerp;
+            curY += (targetY - curY) * lerp;
+            curHeading += (targetHeading - curHeading) * lerp;
+            curSteer += (targetSteer - curSteer) * (1 - Math.exp(-dt * 12));
+            curRoadSpeed += (targetRoadSpeed - curRoadSpeed) * speedLerp;
+
+            if (effMotion === 'stop') {
+                if (Math.abs(curX) < 0.08) curX = 0;
+                if (Math.abs(curY) < 0.08) curY = 0;
+                if (Math.abs(curHeading) < 0.08) curHeading = 0;
+                if (Math.abs(curSteer) < 0.08) curSteer = 0;
+                if (Math.abs(curRoadSpeed) < 0.6) curRoadSpeed = 0;
+            }
+
+            roadScroll = ((roadScroll + dt * curRoadSpeed) % 52 + 52) % 52;
+            treadL = ((treadL + dt * treadRateL) % 24 + 24) % 24;
+            treadR = ((treadR + dt * treadRateR) % 24 + 24) % 24;
+            aeroOff = ((aeroOff - dt * curRoadSpeed * 0.55) % 40 + 40) % 40;
+
+            const isMovingNow = Math.abs(curRoadSpeed) > 4;
+            const speedFactor = curRoadSpeed / 240;
+
+            // Chase-camera parallax (follows car smoothly when driving, parked at center when stopped)
+            const camX = -curX * 0.16;
+            const camY = -curY * 0.12;
+            const camScale = 1 + Math.min(0.035, Math.abs(speedFactor) * 0.025);
+            if (camRig) {
+                camRig.style.transform = `translate3d(${camX.toFixed(1)}px, ${camY.toFixed(1)}px, 0) scale(${camScale.toFixed(3)})`;
+            }
+
+            // 1. Cyber grid & highway lanes (still when stopped, flows forward/backward with motion)
+            const centerX = w * 0.5 + camX * 1.1;
+            const roadHalfW = Math.min(148, w * 0.34);
+            const gridSize = 36;
+            const gxOff = ((camX * 0.5) % gridSize + gridSize) % gridSize;
+            const gyOff = (roadScroll * 0.7) % gridSize;
+
+            ctx.strokeStyle = (st.blocked || st.estop) ? 'rgba(239, 68, 68, 0.08)' : 'rgba(0, 240, 255, 0.06)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let gx = gxOff; gx < w; gx += gridSize) {
+                ctx.moveTo(gx, 0);
+                ctx.lineTo(gx, h);
+            }
+            for (let gy = gyOff - gridSize; gy < h; gy += gridSize) {
+                ctx.moveTo(0, gy);
+                ctx.lineTo(w, gy);
+            }
+            ctx.stroke();
+
+            const topHalfW = roadHalfW * 0.8;
+            const botHalfW = roadHalfW * 1.1;
+            const edgeRgb = effMotion === 'backward' || st.blocked || st.estop ? '239, 68, 68' : '0, 240, 255';
+            [-1, 1].forEach(sign => {
+                const grad = ctx.createLinearGradient(0, 0, 0, h);
+                grad.addColorStop(0, `rgba(${edgeRgb}, 0.05)`);
+                grad.addColorStop(0.5, `rgba(${edgeRgb}, ${isMovingNow ? 0.72 : 0.32})`);
+                grad.addColorStop(1, `rgba(${edgeRgb}, 0.12)`);
+                ctx.strokeStyle = grad;
+                ctx.lineWidth = isMovingNow ? 2.2 : 1.5;
+                ctx.beginPath();
+                ctx.moveTo(centerX + sign * topHalfW, 0);
+                ctx.lineTo(centerX + sign * botHalfW, h);
+                ctx.stroke();
+            });
+
+            [-0.48, 0, 0.48].forEach(laneFrac => {
+                ctx.strokeStyle = laneFrac === 0
+                    ? `rgba(${edgeRgb}, ${isMovingNow ? 0.56 : 0.24})`
+                    : `rgba(56, 189, 248, ${isMovingNow ? 0.34 : 0.16})`;
+                ctx.lineWidth = laneFrac === 0 ? 2.2 : 1.5;
+                ctx.setLineDash([20, 28]);
+                ctx.lineDashOffset = -roadScroll * 1.35;
+                ctx.beginPath();
+                ctx.moveTo(centerX + laneFrac * topHalfW, 0);
+                ctx.lineTo(centerX + laneFrac * botHalfW, h);
+                ctx.stroke();
+            });
+            ctx.setLineDash([]);
+
+            // 2. Speed particles (only drift when vehicle is moving; reverse flows upward!)
+            if (isMovingNow) {
+                particles.forEach(p => {
+                    p.y += dt * p.speed * speedFactor * 1.25;
+                    if (p.y > 1.1) {
+                        p.y = -0.1;
+                        p.x = Math.random();
+                    } else if (p.y < -0.1) {
+                        p.y = 1.1;
+                        p.x = Math.random();
+                    }
+                    const px = p.x * w;
+                    const py = p.y * h;
+                    const streakLen = p.len * Math.min(1.2, Math.abs(speedFactor) + 0.2);
+                    ctx.strokeStyle = effMotion === 'backward' ? 'rgba(239, 68, 68, 0.58)' : p.color;
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(px, py);
+                    ctx.lineTo(px, py + (speedFactor >= 0 ? streakLen : -streakLen));
+                    ctx.stroke();
+                });
+            }
+
+            // 3. Curved tire motion trails (forward: cyan behind rear wheels; backward: red ahead; stopped: fade out cleanly)
+            const absCarX = w * 0.5 + camX + curX;
+            const absCarY = h * 0.5 + camY + curY;
+            const rad = (curHeading * Math.PI) / 180;
+            const trackHalf = 50;
+            const anchorY = effMotion === 'backward' ? -56 : 58;
+            const anchorCx = absCarX - Math.sin(rad) * anchorY;
+            const anchorCy = absCarY + Math.cos(rad) * anchorY;
+
+            if (isMovingNow) {
+                trailHistory.push({
+                    lx: anchorCx - Math.cos(rad) * trackHalf,
+                    ly: anchorCy - Math.sin(rad) * trackHalf,
+                    rx: anchorCx + Math.cos(rad) * trackHalf,
+                    ry: anchorCy + Math.sin(rad) * trackHalf,
+                    rev: curRoadSpeed < 0,
+                });
+                if (trailHistory.length > 22) trailHistory.shift();
+                for (let i = 0; i < trailHistory.length - 1; i++) {
+                    trailHistory[i].ly += dt * curRoadSpeed * 0.9;
+                    trailHistory[i].ry += dt * curRoadSpeed * 0.9;
+                }
+            } else if (trailHistory.length > 0) {
+                trailHistory.shift();
+            }
+
+            for (let i = 1; i < trailHistory.length; i++) {
+                const pt = trailHistory[i];
+                const prev = trailHistory[i - 1];
+                const alpha = (i / trailHistory.length) * 0.5;
+                ctx.strokeStyle = pt.rev ? `rgba(239, 68, 68, ${alpha.toFixed(2)})` : `rgba(0, 240, 255, ${alpha.toFixed(2)})`;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(prev.lx, prev.ly);
+                ctx.lineTo(pt.lx, pt.ly);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(prev.rx, prev.ry);
+                ctx.lineTo(pt.rx, pt.ry);
+                ctx.stroke();
+            }
+
+            // 4. Obstacle warning barrier arc ahead if blocked or estop, else gentle sonar floor ring while active
+            if (st.blocked || st.estop) {
+                const warnPulse = 0.55 + 0.45 * Math.sin(t * 9);
+                ctx.strokeStyle = `rgba(239, 68, 68, ${(0.35 + warnPulse * 0.55).toFixed(2)})`;
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                ctx.arc(absCarX, absCarY - 34, 62 + warnPulse * 8, Math.PI * 1.18, Math.PI * 1.82);
+                ctx.stroke();
+            } else if (isMovingNow) {
+                const ringProg = (t * 0.75) % 1;
+                ctx.beginPath();
+                ctx.arc(absCarX, absCarY - 26, 22 + ringProg * 95, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(${edgeRgb}, ${(0.4 * (1 - ringProg)).toFixed(2)})`;
+                ctx.lineWidth = 1.3;
+                ctx.stroke();
+            }
+
+            // 5. Apply smooth physics transform to car mover & steering/wheels
+            carMover.style.transform = `translate3d(${curX.toFixed(1)}px, ${curY.toFixed(1)}px, 0) rotate(${curHeading.toFixed(2)}deg)`;
+            if (steerFL) steerFL.style.transform = `rotate(${curSteer.toFixed(1)}deg)`;
+            if (steerFR) steerFR.style.transform = `rotate(${curSteer.toFixed(1)}deg)`;
+
+            wheelsLeft.forEach(el => { el.style.strokeDashoffset = treadL.toFixed(1); });
+            wheelsRight.forEach(el => { el.style.strokeDashoffset = treadR.toFixed(1); });
+            aeroStreaks.forEach(el => { el.style.strokeDashoffset = aeroOff.toFixed(1); });
+
+            _dashAnimRaf = requestAnimationFrame(frame);
+        }
+
+        _dashAnimRaf = requestAnimationFrame(frame);
+    }
+
+    function _stopDashSceneAnimation() {
+        if (_dashAnimRaf !== null) {
+            cancelAnimationFrame(_dashAnimRaf);
+            _dashAnimRaf = null;
+        }
+    }
+
+    function _exitToAuth(noticeMsg) {
+        clearTimeout(_expiryTimer);
+        API.disconnect();
+        Camera.setOffline('STREAM UNAVAILABLE', 'Authentication required');
+        _setDisconnectedState();
+        _showAuthScreen(noticeMsg);
     }
 
     /* ── Helpers ─────────────────────────────────────────────── */

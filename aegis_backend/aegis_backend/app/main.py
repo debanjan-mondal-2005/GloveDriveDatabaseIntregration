@@ -2,26 +2,33 @@
 ESPs  -> ws://<laptop>:8000/ws/<main|glove|cam>      (same JSON protocol as before)
 Browser-> http://localhost:8000  (dashboard)  +  ws://localhost:8000/ws/dashboard
 Data   -> Supabase tables telemetry_logs, safety_alerts, device_nodes, vision_snapshots (batched, retried)."""
-import asyncio, contextlib, json, os, sqlite3, tempfile, time, urllib.request, uuid
+import asyncio, contextlib, hashlib, hmac, html, json, os, re, secrets, sqlite3, tempfile, time, urllib.error, urllib.parse, urllib.request, uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / "config" / ".env")
+load_dotenv(ROOT / "config" / ".env", override=True)
 E = os.getenv
 START_TIME = time.time()
 DB_URL = E("DATABASE_URL", "")
 UNIT = E("UNIT_ID", "GLOVEDRIVE-ESP32-01")
 CAMERA_STREAM_URL = E("CAMERA_STREAM_URL", "")
+GOOGLE_CLIENT_ID = E("GOOGLE_CLIENT_ID", "").strip()
+RESEND_API_KEY = E("RESEND_API_KEY", "").strip()
+EMAIL_FROM = E("EMAIL_FROM", "").strip()
+AUTH_SESSION_TTL_S = int(E("AUTH_SESSION_TTL_S", 7 * 24 * 3600))
+OTP_TTL_S = 600
+OTP_RESEND_COOLDOWN_S = 30
+AUTH_COOKIE_NAME = "aegis_session"
 GAS_WARN, GAS_DANGER = int(E("GAS_WARN_RAW", 1500)), int(E("GAS_DANGER_RAW", 2500))
 RSSI_MIN, SILENT_S = int(E("RSSI_MIN_DBM", -80)), float(E("SILENT_AFTER_S", 3))
 LOG_S, CAM_S = float(E("DB_LOG_INTERVAL_S", 1)), float(E("CAM_POLL_INTERVAL_S", 1))
@@ -41,7 +48,16 @@ cool, state = {}, {"estop": False, "prev": (60, 60), "jpg": None, "jpg_t": 0, "a
 SESSION_DB_PATH = None
 session_sync_queue = deque(maxlen=500)
 active_session = None
+_pg_lock = None
 app = FastAPI(title="Aegis Rover Command")
+
+
+@app.exception_handler(HTTPException)
+async def _http_exc_handler(request: Request, exc: HTTPException):
+    resp = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    if exc.status_code == 401:
+        resp.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return resp
 
 app.add_middleware(
     CORSMiddleware,
@@ -183,6 +199,44 @@ def _init_sqlite():
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_local_sessions_started ON vehicle_sessions (started_at DESC)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_uid TEXT PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    password_hash TEXT,
+                    auth_provider TEXT NOT NULL DEFAULT 'email',
+                    google_sub TEXT UNIQUE,
+                    avatar_url TEXT,
+                    email_verified INTEGER NOT NULL DEFAULT 0,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "is_active" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS email_otps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL,
+                    otp_hash TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    consumed INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_uid TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+            """)
             # Finalize any active sessions left open from an unclean shutdown
             now = time.time()
             conn.execute("""
@@ -198,6 +252,485 @@ def _init_sqlite():
             conn.commit()
     except Exception as e:
         print("[session-sqlite-init]", type(e).__name__, e)
+
+
+# ---------------- authentication, OTP & session management ----------------
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _norm_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), 210_000)
+    return f"pbkdf2_sha256${salt}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: str | None) -> bool:
+    if not stored or "$" not in stored:
+        return False
+    parts = stored.split("$")
+    if len(parts) != 3 or parts[0] != "pbkdf2_sha256":
+        return False
+    _, salt, expected_hex = parts
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), 210_000)
+    return hmac.compare_digest(dk.hex(), expected_hex)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _hash_otp(email: str, otp: str) -> str:
+    return hashlib.sha256(f"{_norm_email(email)}:{otp.strip()}".encode("utf-8")).hexdigest()
+
+
+def _public_user(u: dict) -> dict:
+    return {
+        "user_uid": u["user_uid"],
+        "email": u["email"],
+        "name": u["name"],
+        "auth_provider": u.get("auth_provider", "email"),
+        "avatar_url": u.get("avatar_url"),
+        "email_verified": bool(u.get("email_verified")),
+        "is_active": bool(u.get("is_active", True)),
+    }
+
+
+async def _get_pg_pool():
+    """Return initialized asyncpg pool (creating + migrating schema on demand if DB_URL is set)."""
+    global _pg_lock
+    if not DB_URL:
+        return None
+    if db["pool"] is not None and db["schema_ready"]:
+        return db["pool"]
+    if _pg_lock is None:
+        _pg_lock = asyncio.Lock()
+    async with _pg_lock:
+        if db["pool"] is None:
+            db["pool"] = await asyncpg.create_pool(
+                DB_URL, ssl="require", min_size=1, max_size=3, statement_cache_size=0
+            )
+        if not db["schema_ready"]:
+            async with db["pool"].acquire() as c:
+                await _ensure_db_schema(c)
+        return db["pool"]
+
+
+def _purge_local_user(user_uid: str | None = None, email: str | None = None, token_hash: str | None = None):
+    try:
+        with _sqlite_conn() as conn:
+            if token_hash:
+                conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+            if user_uid:
+                conn.execute("DELETE FROM auth_sessions WHERE user_uid = ?", (user_uid,))
+                conn.execute("DELETE FROM users WHERE user_uid = ?", (user_uid,))
+            if email:
+                em = _norm_email(email)
+                rows = conn.execute("SELECT user_uid FROM users WHERE email = ?", (em,)).fetchall()
+                for r in rows:
+                    conn.execute("DELETE FROM auth_sessions WHERE user_uid = ?", (r["user_uid"],))
+                conn.execute("DELETE FROM users WHERE email = ?", (em,))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _pg_row_to_user(row) -> dict:
+    return {
+        "user_uid": row["user_uid"],
+        "email": row["email"],
+        "name": row["name"],
+        "password_hash": row["password_hash"],
+        "auth_provider": row["auth_provider"],
+        "google_sub": row["google_sub"],
+        "avatar_url": row["avatar_url"],
+        "email_verified": bool(row["email_verified"]),
+        "is_active": bool(row["is_active"]) if "is_active" in row else True,
+        "created_at": row["created_at"].timestamp() if isinstance(row["created_at"], datetime) else time.time(),
+        "updated_at": row["updated_at"].timestamp() if isinstance(row["updated_at"], datetime) else time.time(),
+    }
+
+
+async def _auth_get_user(email: str | None = None, user_uid: str | None = None, google_sub: str | None = None) -> dict | None:
+    em = _norm_email(email) if email else None
+    # When Supabase is configured, ALWAYS verify user directly in Supabase (never trust stale SQLite)
+    if DB_URL:
+        try:
+            pool = await _get_pg_pool()
+            async with pool.acquire() as c:
+                row = None
+                if user_uid:
+                    row = await c.fetchrow("SELECT * FROM public.users WHERE user_uid = $1", user_uid)
+                elif google_sub:
+                    row = await c.fetchrow("SELECT * FROM public.users WHERE google_sub = $1", google_sub)
+                elif em:
+                    row = await c.fetchrow("SELECT * FROM public.users WHERE email = $1", em)
+                if not row:
+                    _purge_local_user(user_uid=user_uid, email=em)
+                    return None
+                u = _pg_row_to_user(row)
+                if not u.get("is_active", True):
+                    _purge_local_user(user_uid=u["user_uid"], email=u["email"])
+                    return None
+                await _auth_save_user(u, sync_pg=False)
+                return u
+        except Exception as e:
+            print("[auth-pg-read]", type(e).__name__, e)
+            # Fail closed when Supabase cannot verify
+            raise HTTPException(503, "Authentication database unavailable")
+
+    try:
+        with _sqlite_conn() as conn:
+            row = None
+            if user_uid:
+                row = conn.execute("SELECT * FROM users WHERE user_uid = ?", (user_uid,)).fetchone()
+            elif google_sub:
+                row = conn.execute("SELECT * FROM users WHERE google_sub = ?", (google_sub,)).fetchone()
+            elif em:
+                row = conn.execute("SELECT * FROM users WHERE email = ?", (em,)).fetchone()
+            if row:
+                u = dict(row)
+                if not u.get("is_active", 1):
+                    return None
+                return u
+    except Exception:
+        pass
+    return None
+
+
+async def _auth_save_user(u: dict, sync_pg: bool = True):
+    now = time.time()
+    u.setdefault("created_at", now)
+    u.setdefault("is_active", True)
+    u["updated_at"] = now
+    if sync_pg and DB_URL:
+        pool = await _get_pg_pool()
+        async with pool.acquire() as c:
+            await c.execute("""
+                INSERT INTO public.users (user_uid, email, name, password_hash, auth_provider, google_sub, avatar_url, email_verified, is_active, created_at, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
+                ON CONFLICT (user_uid) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    name = EXCLUDED.name,
+                    password_hash = COALESCE(EXCLUDED.password_hash, public.users.password_hash),
+                    auth_provider = EXCLUDED.auth_provider,
+                    google_sub = COALESCE(EXCLUDED.google_sub, public.users.google_sub),
+                    avatar_url = COALESCE(EXCLUDED.avatar_url, public.users.avatar_url),
+                    email_verified = EXCLUDED.email_verified,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = NOW()
+            """,
+                u["user_uid"], _norm_email(u["email"]), u["name"], u.get("password_hash"),
+                u.get("auth_provider", "email"), u.get("google_sub"), u.get("avatar_url"),
+                bool(u.get("email_verified")), bool(u.get("is_active", True)),
+            )
+    with _sqlite_conn() as conn:
+        conn.execute("""
+            INSERT INTO users (user_uid, email, name, password_hash, auth_provider, google_sub, avatar_url, email_verified, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_uid) DO UPDATE SET
+                email = excluded.email,
+                name = excluded.name,
+                password_hash = COALESCE(excluded.password_hash, users.password_hash),
+                auth_provider = excluded.auth_provider,
+                google_sub = COALESCE(excluded.google_sub, users.google_sub),
+                avatar_url = COALESCE(excluded.avatar_url, users.avatar_url),
+                email_verified = excluded.email_verified,
+                is_active = excluded.is_active,
+                updated_at = excluded.updated_at
+        """, (
+            u["user_uid"], _norm_email(u["email"]), u["name"], u.get("password_hash"),
+            u.get("auth_provider", "email"), u.get("google_sub"), u.get("avatar_url"),
+            1 if u.get("email_verified") else 0, 1 if u.get("is_active", True) else 0,
+            float(u["created_at"]), float(u["updated_at"]),
+        ))
+        conn.commit()
+
+
+def _send_resend_email_sync(to_email: str, name: str, otp: str):
+    if not RESEND_API_KEY or not EMAIL_FROM:
+        raise HTTPException(500, "Email OTP service is not configured on the server")
+    safe_name = html.escape(name or "Operator")
+    html_body = f"""
+    <div style="font-family:Inter,Segoe UI,Arial,sans-serif;background:#060911;color:#f8fafc;padding:28px;border-radius:12px;max-width:480px;margin:auto;border:1px solid #1e293b;">
+      <div style="color:#00f0ff;font-size:12px;letter-spacing:2px;font-weight:700;margin-bottom:6px;">GLOVE DRIVE // AEGIS ROVER COMMAND</div>
+      <h2 style="margin:0 0 12px 0;font-size:20px;color:#ffffff;">Email Verification Code</h2>
+      <p style="color:#94a3b8;font-size:14px;line-height:1.6;">Hi {safe_name},<br>Use the 6-digit verification code below to activate your telemetry dashboard account. This code expires in 10 minutes.</p>
+      <div style="margin:22px 0;padding:16px;text-align:center;background:#0a0f1d;border:1px solid rgba(0,240,255,0.35);border-radius:10px;font-family:monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#00f0ff;">
+        {otp}
+      </div>
+      <p style="color:#64748b;font-size:12px;margin:0;">If you did not request this code, you can safely ignore this email.</p>
+    </div>
+    """
+    payload = json.dumps({
+        "from": EMAIL_FROM,
+        "to": [to_email],
+        "subject": f"Your Aegis Rover verification code: {otp}",
+        "html": html_body,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "AegisRoverCommand/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 400:
+                raise HTTPException(502, "Failed to send verification email")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            err_json = json.loads(e.read().decode("utf-8", errors="replace"))
+            detail = err_json.get("message") or err_json.get("name") or ""
+        except Exception:
+            pass
+        raise HTTPException(502, f"Resend email delivery failed ({e.code}){': ' + detail if detail else ''}")
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach email service: {type(e).__name__}")
+
+
+async def _issue_and_send_otp(email: str, name: str, enforce_cooldown: bool = True):
+    em = _norm_email(email)
+    now = time.time()
+    with _sqlite_conn() as conn:
+        if enforce_cooldown:
+            last = conn.execute(
+                "SELECT created_at FROM email_otps WHERE email = ? ORDER BY created_at DESC LIMIT 1",
+                (em,),
+            ).fetchone()
+            if last and (now - float(last["created_at"])) < OTP_RESEND_COOLDOWN_S:
+                wait_s = int(OTP_RESEND_COOLDOWN_S - (now - float(last["created_at"]))) + 1
+                raise HTTPException(429, f"Please wait {wait_s}s before requesting a new code")
+
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        otp_h = _hash_otp(em, otp)
+        exp = now + OTP_TTL_S
+        # Send email BEFORE invalidating/persisting so transient failures stay clean
+        await asyncio.to_thread(_send_resend_email_sync, em, name, otp)
+        conn.execute("UPDATE email_otps SET consumed = 1 WHERE email = ? AND consumed = 0", (em,))
+        conn.execute(
+            "INSERT INTO email_otps (email, otp_hash, expires_at, attempts, consumed, created_at) VALUES (?, ?, ?, 0, 0, ?)",
+            (em, otp_h, exp, now),
+        )
+        conn.commit()
+    if DB_URL:
+        try:
+            pool = await _get_pg_pool()
+            async with pool.acquire() as c:
+                await c.execute("UPDATE public.email_otps SET consumed = TRUE WHERE email = $1 AND consumed = FALSE", em)
+                await c.execute(
+                    "INSERT INTO public.email_otps (email, otp_hash, expires_at, attempts, consumed, created_at) VALUES ($1,$2,$3,0,FALSE,NOW())",
+                    em, otp_h, datetime.fromtimestamp(exp, tz=timezone.utc),
+                )
+        except Exception:
+            pass
+
+
+async def _verify_email_otp(email: str, otp: str) -> bool:
+    em = _norm_email(email)
+    code = (otp or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        raise HTTPException(400, "Enter a valid 6-digit verification code")
+    now = time.time()
+    otp_h = _hash_otp(em, code)
+    with _sqlite_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM email_otps WHERE email = ? AND consumed = 0 ORDER BY created_at DESC LIMIT 1",
+            (em,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(400, "No active verification code found. Please request a new code.")
+        if float(row["expires_at"]) < now:
+            conn.execute("UPDATE email_otps SET consumed = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            raise HTTPException(400, "Verification code expired. Please request a new code.")
+        if int(row["attempts"]) >= 5:
+            conn.execute("UPDATE email_otps SET consumed = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            raise HTTPException(429, "Too many invalid attempts. Please request a new verification code.")
+        if not hmac.compare_digest(row["otp_hash"], otp_h):
+            conn.execute("UPDATE email_otps SET attempts = attempts + 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            raise HTTPException(400, "Invalid verification code")
+        conn.execute("UPDATE email_otps SET consumed = 1 WHERE id = ?", (row["id"],))
+        conn.commit()
+    if DB_URL:
+        try:
+            pool = await _get_pg_pool()
+            async with pool.acquire() as c:
+                await c.execute("UPDATE public.email_otps SET consumed = TRUE WHERE email = $1 AND consumed = FALSE", em)
+        except Exception:
+            pass
+    return True
+
+
+async def _create_auth_session(user_uid: str) -> tuple[str, float]:
+    token = secrets.token_urlsafe(32)
+    t_hash = _hash_token(token)
+    now = time.time()
+    exp = now + AUTH_SESSION_TTL_S
+    if DB_URL:
+        pool = await _get_pg_pool()
+        async with pool.acquire() as c:
+            await c.execute(
+                "INSERT INTO public.auth_sessions (token_hash, user_uid, expires_at, revoked, created_at) VALUES ($1,$2,$3,FALSE,NOW())",
+                t_hash, user_uid, datetime.fromtimestamp(exp, tz=timezone.utc),
+            )
+    with _sqlite_conn() as conn:
+        conn.execute(
+            "INSERT INTO auth_sessions (token_hash, user_uid, expires_at, revoked, created_at) VALUES (?, ?, ?, 0, ?)",
+            (t_hash, user_uid, exp, now),
+        )
+        conn.commit()
+    return token, exp
+
+
+async def _validate_session_token(token: str | None) -> tuple[dict, float] | None:
+    if not token:
+        return None
+    t_hash = _hash_token(token)
+    now = time.time()
+
+    # Authoritative check against Supabase whenever DB_URL is configured
+    if DB_URL:
+        try:
+            pool = await _get_pg_pool()
+            async with pool.acquire() as c:
+                r = await c.fetchrow("""
+                    SELECT s.token_hash, s.user_uid, s.expires_at, s.revoked,
+                           u.email, u.name, u.password_hash, u.auth_provider, u.google_sub,
+                           u.avatar_url, u.email_verified, COALESCE(u.is_active, TRUE) AS is_active,
+                           u.created_at, u.updated_at
+                    FROM public.auth_sessions s
+                    INNER JOIN public.users u ON u.user_uid = s.user_uid
+                    WHERE s.token_hash = $1
+                """, t_hash)
+                if not r:
+                    _purge_local_user(token_hash=t_hash)
+                    return None
+                exp_ts = r["expires_at"].timestamp() if isinstance(r["expires_at"], datetime) else float(r["expires_at"])
+                if r["revoked"] or exp_ts <= now or not r["email_verified"] or not r["is_active"]:
+                    if exp_ts <= now and not r["revoked"]:
+                        await c.execute("UPDATE public.auth_sessions SET revoked = TRUE WHERE token_hash = $1", t_hash)
+                    _purge_local_user(token_hash=t_hash)
+                    if not r["is_active"]:
+                        _purge_local_user(user_uid=r["user_uid"])
+                    return None
+                user = _pg_row_to_user(r)
+                return user, exp_ts
+        except Exception as e:
+            print("[auth-pg-validate]", type(e).__name__, e)
+            # Fail closed: never trust local cache if Supabase cannot confirm user is still active
+            return None
+
+    # Local-only fallback when no DATABASE_URL is configured
+    row = None
+    with _sqlite_conn() as conn:
+        r = conn.execute("SELECT * FROM auth_sessions WHERE token_hash = ?", (t_hash,)).fetchone()
+        if r:
+            row = dict(r)
+    if not row or row.get("revoked"):
+        return None
+    exp = float(row["expires_at"])
+    if exp <= now:
+        _purge_local_user(token_hash=t_hash)
+        return None
+    user = await _auth_get_user(user_uid=row["user_uid"])
+    if not user or not user.get("email_verified") or not user.get("is_active", 1):
+        _purge_local_user(token_hash=t_hash)
+        return None
+    return user, exp
+
+
+async def _revoke_session_token(token: str | None):
+    if not token:
+        return
+    t_hash = _hash_token(token)
+    _purge_local_user(token_hash=t_hash)
+    if DB_URL:
+        try:
+            pool = await _get_pg_pool()
+            async with pool.acquire() as c:
+                await c.execute("UPDATE public.auth_sessions SET revoked = TRUE WHERE token_hash = $1", t_hash)
+        except Exception:
+            pass
+
+
+def _extract_token(request: Request) -> str | None:
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    cookie_tok = request.cookies.get(AUTH_COOKIE_NAME)
+    if cookie_tok:
+        return cookie_tok.strip()
+    q_tok = request.query_params.get("token")
+    if q_tok:
+        return q_tok.strip()
+    return None
+
+
+async def require_auth(request: Request) -> dict:
+    tok = _extract_token(request)
+    res = await _validate_session_token(tok)
+    if not res:
+        raise HTTPException(401, "Authentication required or session expired")
+    user, exp = res
+    return {"user": user, "expires_at": exp, "token": tok}
+
+
+def _verify_google_id_token_sync(credential: str) -> dict:
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google Sign-In is not configured on the server")
+    url = "https://oauth2.googleapis.com/tokeninfo?" + urllib.parse.urlencode({"id_token": credential})
+    req = urllib.request.Request(url, headers={"User-Agent": "AegisRoverCommand/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            info = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        raise HTTPException(401, "Invalid or expired Google credential")
+    except Exception as e:
+        raise HTTPException(502, f"Unable to verify Google token: {type(e).__name__}")
+
+    if info.get("aud") != GOOGLE_CLIENT_ID:
+        raise HTTPException(401, "Google token audience mismatch")
+    if info.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+        raise HTTPException(401, "Invalid Google token issuer")
+    if str(info.get("email_verified", "")).lower() != "true":
+        raise HTTPException(401, "Google account email is not verified")
+    try:
+        if int(info.get("exp", 0)) <= int(time.time()):
+            raise HTTPException(401, "Google token expired")
+    except ValueError:
+        raise HTTPException(401, "Malformed Google token expiry")
+    if not info.get("email") or not info.get("sub"):
+        raise HTTPException(401, "Incomplete Google profile claims")
+    return info
+
+
+def _auth_session_response(user: dict, token: str, exp: float) -> JSONResponse:
+    resp = JSONResponse({
+        "ok": True,
+        "token": token,
+        "expires_at": exp,
+        "user": _public_user(user),
+    })
+    resp.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=AUTH_SESSION_TTL_S,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return resp
 
 
 def _save_session_sqlite(sess: dict, synced: int = 0):
@@ -444,7 +977,15 @@ def on_message(name, text):
 @app.websocket("/ws/{name}")
 async def ws_endpoint(ws: WebSocket, name: str):
     await ws.accept()
-    if name == "dashboard": return await dashboard(ws)
+    if name == "dashboard":
+        tok = ws.cookies.get(AUTH_COOKIE_NAME) or ws.query_params.get("token")
+        if not await _validate_session_token(tok):
+            try:
+                await ws.send_text(json.dumps({"error": "Authentication required", "code": 401}))
+            except Exception:
+                pass
+            return await ws.close(code=1008)
+        return await dashboard(ws, tok)
     if name not in devs: return await ws.close()
     d = devs[name]
     d.update(ws=ws, ip=ws.client.host if ws.client else None, last=time.time(), seq=None)
@@ -504,25 +1045,237 @@ def snapshot():
                 alerts=[{**a} for a in list(alerts)[:30]], cam=bool(state["jpg"]))
 
 
-async def dashboard(ws):
+async def dashboard(ws, tok: str | None = None):
+    closed = {"flag": False}
+
+    async def _reject_and_close():
+        if closed["flag"]:
+            return
+        closed["flag"] = True
+        try:
+            await ws.send_text(json.dumps({"error": "Account deleted or session expired", "code": 401}))
+        except Exception:
+            pass
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
+
     async def sender():
+        ticks = 0
         while True:
-            await ws.send_text(json.dumps(snapshot())); await asyncio.sleep(0.25)
+            ticks += 1
+            if ticks % 8 == 0:
+                if not await _validate_session_token(tok):
+                    await _reject_and_close()
+                    return
+            await ws.send_text(json.dumps(snapshot()))
+            await asyncio.sleep(0.25)
+
     task = asyncio.create_task(sender())
     try:
         while True:
-            try: await run_cmd(json.loads(await ws.receive_text()))
-            except HTTPException as e: await ws.send_text(json.dumps({"error": e.detail}))
-    except Exception: pass
-    finally: task.cancel()
+            raw = await ws.receive_text()
+            if not await _validate_session_token(tok):
+                await _reject_and_close()
+                break
+            try:
+                await run_cmd(json.loads(raw))
+            except HTTPException as e:
+                await ws.send_text(json.dumps({"error": e.detail}))
+    except Exception:
+        pass
+    finally:
+        task.cancel()
 
 
 class Cmd(BaseModel):
     payload: dict
 
 
+class SignupReq(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class VerifyOtpReq(BaseModel):
+    email: str
+    otp: str
+
+
+class ResendOtpReq(BaseModel):
+    email: str
+
+
+class LoginReq(BaseModel):
+    email: str
+    password: str
+
+
+class GoogleAuthReq(BaseModel):
+    credential: str
+
+
+@app.get("/api/auth/config")
+def api_auth_config():
+    return {
+        "google_client_id": GOOGLE_CLIENT_ID,
+        "google_enabled": bool(GOOGLE_CLIENT_ID),
+        "email_otp_enabled": bool(RESEND_API_KEY and EMAIL_FROM),
+        "otp_ttl_s": OTP_TTL_S,
+        "session_ttl_s": AUTH_SESSION_TTL_S,
+    }
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(auth: dict = Depends(require_auth)):
+    return {
+        "authenticated": True,
+        "user": _public_user(auth["user"]),
+        "expires_at": auth["expires_at"],
+    }
+
+
+@app.post("/api/auth/signup")
+async def api_auth_signup(req: SignupReq):
+    name = (req.name or "").strip()
+    em = _norm_email(req.email)
+    pw = req.password or ""
+    if len(name) < 2:
+        raise HTTPException(400, "Please enter your full name (at least 2 characters)")
+    if not _EMAIL_RE.match(em):
+        raise HTTPException(400, "Please enter a valid email address")
+    if len(pw) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+
+    existing = await _auth_get_user(email=em)
+    if existing and existing.get("email_verified"):
+        raise HTTPException(409, "An account with this email already exists. Please sign in.")
+
+    user_uid = existing["user_uid"] if existing else uuid.uuid4().hex[:16]
+    user = {
+        "user_uid": user_uid,
+        "email": em,
+        "name": name[:80],
+        "password_hash": _hash_password(pw),
+        "auth_provider": "email",
+        "google_sub": existing.get("google_sub") if existing else None,
+        "avatar_url": existing.get("avatar_url") if existing else None,
+        "email_verified": False,
+        "created_at": existing.get("created_at", time.time()) if existing else time.time(),
+    }
+    await _issue_and_send_otp(em, user["name"], enforce_cooldown=False)
+    await _auth_save_user(user)
+    return {
+        "ok": True,
+        "requires_otp": True,
+        "email": em,
+        "message": f"Verification code sent to {em}",
+    }
+
+
+@app.post("/api/auth/verify-otp")
+async def api_auth_verify_otp(req: VerifyOtpReq):
+    em = _norm_email(req.email)
+    user = await _auth_get_user(email=em)
+    if not user:
+        raise HTTPException(404, "Account not found. Please sign up first.")
+    await _verify_email_otp(em, req.otp)
+    user["email_verified"] = True
+    await _auth_save_user(user)
+    token, exp = await _create_auth_session(user["user_uid"])
+    return _auth_session_response(user, token, exp)
+
+
+@app.post("/api/auth/resend-otp")
+async def api_auth_resend_otp(req: ResendOtpReq):
+    em = _norm_email(req.email)
+    if not _EMAIL_RE.match(em):
+        raise HTTPException(400, "Invalid email address")
+    user = await _auth_get_user(email=em)
+    if not user:
+        raise HTTPException(404, "Account not found")
+    if user.get("email_verified"):
+        raise HTTPException(400, "Email is already verified. Please sign in.")
+    await _issue_and_send_otp(em, user["name"], enforce_cooldown=True)
+    return {"ok": True, "message": f"New verification code sent to {em}"}
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(req: LoginReq):
+    em = _norm_email(req.email)
+    pw = req.password or ""
+    if not _EMAIL_RE.match(em) or not pw:
+        raise HTTPException(400, "Email and password are required")
+    user = await _auth_get_user(email=em)
+    if not user:
+        raise HTTPException(401, "Invalid email or password")
+    if not user.get("password_hash"):
+        raise HTTPException(400, "This account uses Google Sign-In. Click Continue with Google.")
+    if not _verify_password(pw, user.get("password_hash")):
+        raise HTTPException(401, "Invalid email or password")
+    if not user.get("email_verified"):
+        try:
+            await _issue_and_send_otp(em, user["name"], enforce_cooldown=True)
+            msg = "Email not verified yet. A verification code has been sent to your email."
+        except HTTPException as e:
+            msg = e.detail if e.status_code == 429 else "Email not verified yet. Please verify with your OTP code."
+        return JSONResponse(
+            status_code=403,
+            content={"detail": msg, "requires_otp": True, "email": em},
+        )
+    token, exp = await _create_auth_session(user["user_uid"])
+    return _auth_session_response(user, token, exp)
+
+
+@app.post("/api/auth/google")
+async def api_auth_google(req: GoogleAuthReq):
+    cred = (req.credential or "").strip()
+    if not cred:
+        raise HTTPException(400, "Missing Google credential token")
+    info = await asyncio.to_thread(_verify_google_id_token_sync, cred)
+    em = _norm_email(info["email"])
+    sub = str(info["sub"])
+    name = (info.get("name") or em.split("@")[0])[:80]
+    avatar = info.get("picture")
+
+    user = await _auth_get_user(google_sub=sub) or await _auth_get_user(email=em)
+    if user:
+        user["name"] = user.get("name") or name
+        user["google_sub"] = sub
+        user["avatar_url"] = avatar or user.get("avatar_url")
+        user["email_verified"] = True
+        if not user.get("password_hash"):
+            user["auth_provider"] = "google"
+    else:
+        user = {
+            "user_uid": uuid.uuid4().hex[:16],
+            "email": em,
+            "name": name,
+            "password_hash": None,
+            "auth_provider": "google",
+            "google_sub": sub,
+            "avatar_url": avatar,
+            "email_verified": True,
+            "created_at": time.time(),
+        }
+    await _auth_save_user(user)
+    token, exp = await _create_auth_session(user["user_uid"])
+    return _auth_session_response(user, token, exp)
+
+
+@app.post("/api/auth/logout")
+async def api_auth_logout(request: Request):
+    tok = _extract_token(request)
+    await _revoke_session_token(tok)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return resp
+
+
 @app.post("/api/command")
-async def api_command(c: Cmd):
+async def api_command(c: Cmd, _auth: dict = Depends(require_auth)):
     await run_cmd(c.payload); return {"sent": True}
 
 
@@ -538,11 +1291,11 @@ def api_health():
 
 
 @app.get("/api/status")
-def api_status(): return snapshot()
+def api_status(_auth: dict = Depends(require_auth)): return snapshot()
 
 
 @app.get("/api/history")
-def api_history(): return list(hist)
+def api_history(_auth: dict = Depends(require_auth)): return list(hist)
 
 
 # ---------------- session queries & PDF report builder ----------------
@@ -1181,12 +1934,12 @@ def _build_session_pdf(sess: dict) -> bytes:
 
 
 @app.get("/api/sessions")
-async def api_sessions(date: str | None = Query(default=None)):
+async def api_sessions(date: str | None = Query(default=None), _auth: dict = Depends(require_auth)):
     return await _get_daily_sessions_payload(date, include_samples=False)
 
 
 @app.get("/api/sessions/report.pdf")
-async def api_sessions_daily_pdf(date: str | None = Query(default=None)):
+async def api_sessions_daily_pdf(date: str | None = Query(default=None), _auth: dict = Depends(require_auth)):
     daily = await _get_daily_sessions_payload(date, include_samples=True)
     pdf_bytes = _build_daily_pdf(daily)
     fname = f"aegis_daily_report_{daily['date']}.pdf"
@@ -1198,7 +1951,7 @@ async def api_sessions_daily_pdf(date: str | None = Query(default=None)):
 
 
 @app.get("/api/sessions/{session_uid}")
-async def api_session_detail(session_uid: str):
+async def api_session_detail(session_uid: str, _auth: dict = Depends(require_auth)):
     sess = await _get_single_session(session_uid)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -1206,7 +1959,7 @@ async def api_session_detail(session_uid: str):
 
 
 @app.get("/api/sessions/{session_uid}/report.pdf")
-async def api_session_pdf(session_uid: str):
+async def api_session_pdf(session_uid: str, _auth: dict = Depends(require_auth)):
     sess = await _get_single_session(session_uid)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -1221,7 +1974,7 @@ async def api_session_pdf(session_uid: str):
 
 
 @app.post("/api/alerts/{alert_id}/ack")
-def api_ack_alert(alert_id: int):
+def api_ack_alert(alert_id: int, _auth: dict = Depends(require_auth)):
     for a in alerts:
         if a.get("id") == alert_id:
             a["acked"] = True
@@ -1231,7 +1984,7 @@ def api_ack_alert(alert_id: int):
 
 @app.get("/api/cam-status")
 @app.get("/api/camera/status")
-def api_cam_status():
+def api_cam_status(_auth: dict = Depends(require_auth)):
     """Camera health check: whether a frame is available and how old it is."""
     cam_node = devs["cam"]
     return {
@@ -1245,7 +1998,7 @@ def api_cam_status():
 
 
 @app.get("/api/camera/stream")
-async def api_camera_stream():
+async def api_camera_stream(_auth: dict = Depends(require_auth)):
     """MJPEG stream relay served from backend-buffered frames (never exposes camera IP)."""
     if not state["jpg"] and status(devs["cam"]) != "ONLINE" and not CAMERA_STREAM_URL:
         raise HTTPException(503, "camera stream unavailable")
@@ -1277,7 +2030,7 @@ async def api_camera_stream():
 
 
 @app.get("/latest.jpg")
-def latest():
+def latest(_auth: dict = Depends(require_auth)):
     if not state["jpg"]: raise HTTPException(404, "no frame yet")
     return Response(state["jpg"], media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -1385,6 +2138,46 @@ async def _ensure_db_schema(c):
         );
     """)
     await c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device_started ON public.vehicle_sessions (device_id, started_at DESC);")
+    await c.execute("""
+        CREATE TABLE IF NOT EXISTS public.users (
+            id              BIGSERIAL PRIMARY KEY,
+            user_uid        TEXT        UNIQUE NOT NULL,
+            email           TEXT        UNIQUE NOT NULL,
+            name            TEXT        NOT NULL,
+            password_hash   TEXT,
+            auth_provider   TEXT        NOT NULL DEFAULT 'email',
+            google_sub      TEXT        UNIQUE,
+            avatar_url      TEXT,
+            email_verified  BOOLEAN     NOT NULL DEFAULT FALSE,
+            is_active       BOOLEAN     NOT NULL DEFAULT TRUE,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    await c.execute("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;")
+    await c.execute("""
+        CREATE TABLE IF NOT EXISTS public.email_otps (
+            id              BIGSERIAL PRIMARY KEY,
+            email           TEXT        NOT NULL,
+            otp_hash        TEXT        NOT NULL,
+            expires_at      TIMESTAMPTZ NOT NULL,
+            attempts        INT         NOT NULL DEFAULT 0,
+            consumed        BOOLEAN     NOT NULL DEFAULT FALSE,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    await c.execute("CREATE INDEX IF NOT EXISTS idx_email_otps_email ON public.email_otps (email, created_at DESC);")
+    await c.execute("""
+        CREATE TABLE IF NOT EXISTS public.auth_sessions (
+            id              BIGSERIAL PRIMARY KEY,
+            token_hash      TEXT        UNIQUE NOT NULL,
+            user_uid        TEXT        NOT NULL,
+            expires_at      TIMESTAMPTZ NOT NULL,
+            revoked         BOOLEAN     NOT NULL DEFAULT FALSE,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    await c.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON public.auth_sessions (user_uid, expires_at DESC);")
     # Finalize any old active sessions left open in Supabase from a prior crash
     await c.execute("""
         UPDATE public.vehicle_sessions

@@ -141,6 +141,50 @@ CREATE INDEX IF NOT EXISTS idx_sessions_device_started
 
 
 -- ─────────────────────────────────────────────
+-- 6. AUTHENTICATION (Users, Email OTPs, Sessions)
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.users (
+    id              BIGSERIAL PRIMARY KEY,
+    user_uid        TEXT        UNIQUE NOT NULL,
+    email           TEXT        UNIQUE NOT NULL,
+    name            TEXT        NOT NULL,
+    password_hash   TEXT,
+    auth_provider   TEXT        NOT NULL DEFAULT 'email',  -- 'email' | 'google'
+    google_sub      TEXT        UNIQUE,
+    avatar_url      TEXT,
+    email_verified  BOOLEAN     NOT NULL DEFAULT FALSE,
+    is_active       BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.email_otps (
+    id              BIGSERIAL PRIMARY KEY,
+    email           TEXT        NOT NULL,
+    otp_hash        TEXT        NOT NULL,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    attempts        INT         NOT NULL DEFAULT 0,
+    consumed        BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_otps_email
+    ON public.email_otps (email, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.auth_sessions (
+    id              BIGSERIAL PRIMARY KEY,
+    token_hash      TEXT        UNIQUE NOT NULL,
+    user_uid        TEXT        NOT NULL,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    revoked         BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+    ON public.auth_sessions (user_uid, expires_at DESC);
+
+
+-- ─────────────────────────────────────────────
 -- Row-Level Security: open for server-side use
 -- (enable RLS if you expose these to a browser client)
 -- ─────────────────────────────────────────────
@@ -149,6 +193,9 @@ ALTER TABLE public.safety_alerts     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.device_nodes      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vision_snapshots  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vehicle_sessions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.users             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.email_otps        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.auth_sessions     ENABLE ROW LEVEL SECURITY;
 
 -- Allow the service-role key (backend) full access
 -- (drop first so the script is re-runnable)
@@ -167,5 +214,14 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_sessions' AND tablename='vehicle_sessions') THEN
     CREATE POLICY "service_all_sessions" ON public.vehicle_sessions FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_users' AND tablename='users') THEN
+    CREATE POLICY "service_all_users" ON public.users FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_otps' AND tablename='email_otps') THEN
+    CREATE POLICY "service_all_otps" ON public.email_otps FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname='service_all_auth_sessions' AND tablename='auth_sessions') THEN
+    CREATE POLICY "service_all_auth_sessions" ON public.auth_sessions FOR ALL USING (true) WITH CHECK (true);
   END IF;
 END $$;
