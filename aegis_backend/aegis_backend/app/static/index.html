@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GLOVE DRIVE | Smart Vehicle IoT Telemetry</title>
+
+    <!-- Google Fonts: Space Grotesk, Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="/css/style.css?v=5">
+</head>
+
+<body class="dark-theme">
+    <div class="app-container">
+        <!-- Sidebar Backdrop for Mobile -->
+        <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+
+        <!-- Sidebar Navigation -->
+        <aside id="app-sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="brand-logo">
+                    <div class="logo-hexagon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2" />
+                            <path d="M12 2v20M2 8.5l20 7M2 15.5l20-7" stroke-opacity="0.4" />
+                        </svg>
+                    </div>
+                    <div class="brand-text">
+                        <span class="brand-title">GLOVE DRIVE</span>
+                        <span class="brand-subtitle">Smart IoT Vehicle</span>
+                    </div>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-section-label">TELEMETRY SYSTEM</div>
+                <a href="#overview" class="nav-link active" data-target="overview">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="9" rx="1" />
+                        <rect x="14" y="3" width="7" height="5" rx="1" />
+                        <rect x="14" y="12" width="7" height="9" rx="1" />
+                        <rect x="3" y="16" width="7" height="5" rx="1" />
+                    </svg>
+                    <span>Overview</span>
+                </a>
+                <a href="#telemetry" class="nav-link" data-target="telemetry">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                    </svg>
+                    <span>Live Telemetry</span>
+                </a>
+                <a href="#analytics" class="nav-link" data-target="analytics">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="20" x2="18" y2="10" />
+                        <line x1="12" y1="20" x2="12" y2="4" />
+                        <line x1="6" y1="20" x2="6" y2="14" />
+                    </svg>
+                    <span>Sensor Analytics</span>
+                </a>
+                <a href="#safety" class="nav-link" data-target="safety">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    </svg>
+                    <span>Safety &amp; Alerts</span>
+                </a>
+                <a href="#device" class="nav-link" data-target="device">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="4" y="4" width="16" height="16" rx="2" />
+                        <rect x="9" y="9" width="6" height="6" />
+                        <line x1="9" y1="1" x2="9" y2="4" />
+                        <line x1="15" y1="1" x2="15" y2="4" />
+                        <line x1="9" y1="20" x2="9" y2="23" />
+                        <line x1="15" y1="20" x2="15" y2="23" />
+                        <line x1="20" y1="9" x2="23" y2="9" />
+                        <line x1="20" y1="14" x2="23" y2="14" />
+                        <line x1="1" y1="9" x2="4" y2="9" />
+                        <line x1="1" y1="14" x2="4" y2="14" />
+                    </svg>
+                    <span>Device Info</span>
+                </a>
+
+                <!-- SYSTEM NODES (3 nodes: red before connect, green after connect) -->
+                <div class="nav-section-label" style="margin-top: 14px;">SYSTEM NODES</div>
+                <div id="sidebar-nodes-list" class="sidebar-nodes-list"></div>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="vehicle-mini-status">
+                    <div id="sidebar-unit-dot" class="status-dot-pulse"></div>
+                    <div class="mini-status-text">
+                        <span class="text-xs text-muted">TARGET UNIT</span>
+                        <span id="sidebar-unit-id"
+                            class="font-mono text-cyan text-sm font-semibold">GLOVEDRIVE-ESP32-01</span>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <div class="main-wrapper">
+            <!-- Top Navigation Bar -->
+            <header class="top-navbar">
+                <div class="navbar-left">
+                    <button id="mobile-sidebar-toggle" class="btn-icon mobile-only" aria-label="Toggle menu">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="3" y1="12" x2="21" y2="12" />
+                            <line x1="3" y1="6" x2="21" y2="6" />
+                            <line x1="3" y1="18" x2="21" y2="18" />
+                        </svg>
+                    </button>
+                    <div class="view-header-title">
+                        <h1 id="navbar-page-title">Vehicle Overview</h1>
+                        <span class="text-xs text-muted">Gesture-Controlled Telemetry Stream</span>
+                    </div>
+                </div>
+
+                <div class="navbar-right">
+                    <!-- Device Selector -->
+                    <div class="device-pill">
+                        <span class="text-xs text-muted">DEVICE:</span>
+                        <select id="device-select" class="device-select-input">
+                            <option value="GLOVEDRIVE-ESP32-01" selected>GLOVEDRIVE-ESP32-01</option>
+                        </select>
+                    </div>
+
+                    <!-- Connection Status -->
+                    <div id="connection-status-pill" class="status-indicator status-checking">
+                        <div class="indicator-dot"></div>
+                        <span id="connection-status-text">Checking Backend</span>
+                    </div>
+
+                    <!-- DB Status -->
+                    <div id="db-status-pill" class="status-indicator status-checking">
+                        <div class="indicator-dot"></div>
+                        <span id="db-status-text">DB: --</span>
+                    </div>
+
+                    <!-- Emergency Stop -->
+                    <button id="btn-estop" class="btn-estop" type="button">E-STOP</button>
+
+                    <!-- Last Update Time -->
+                    <span id="last-update-label" class="last-update-text">Connecting...</span>
+                </div>
+            </header>
+
+            <!-- Dashboard Content Container -->
+            <main class="content-container">
+                <!-- ============================================================== -->
+                <!-- 1. OVERVIEW VIEW -->
+                <!-- ============================================================== -->
+                <section id="view-overview" class="view-section active">
+                    <!-- Hero Vehicle Status Card -->
+                    <div class="card hero-vehicle-card">
+                        <div class="card-header">
+                            <div class="header-badge-group">
+                                <span id="hero-unit-tag" class="badge-tag">UNIT # GLOVEDRIVE-ESP32-01</span>
+                                <span id="hero-status-badge" class="badge-tag tag-cyan">ESP32 DUAL-MOTOR</span>
+                                <span id="hero-blocked-badge" class="status-badge badge-warning">NO SIGNAL</span>
+                            </div>
+                            <div class="direction-indicator-hero">
+                                <span class="text-xs text-muted">ACTIVE VECTOR:</span>
+                                <span id="hero-direction-badge" class="font-mono text-cyan font-bold text-lg">NO
+                                    SIGNAL</span>
+                            </div>
+                        </div>
+
+                        <div class="hero-body-grid">
+                            <!-- Left: Direction HUD controls -->
+                            <div class="direction-hud-panel">
+                                <span class="panel-section-title">VECTOR CONTROL</span>
+                                <div class="hud-cross">
+                                    <div class="hud-row">
+                                        <div id="dir-btn-forward" class="hud-btn dir-forward">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2.5">
+                                                <polyline points="18 15 12 9 6 15" />
+                                            </svg>
+                                            <span>FWD</span>
+                                        </div>
+                                    </div>
+                                    <div class="hud-row middle-row">
+                                        <div id="dir-btn-left" class="hud-btn dir-left">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2.5">
+                                                <polyline points="15 18 9 12 15 6" />
+                                            </svg>
+                                            <span>LFT</span>
+                                        </div>
+                                        <div id="dir-btn-stop" class="hud-btn dir-stop">
+                                            <span>HALT</span>
+                                        </div>
+                                        <div id="dir-btn-right" class="hud-btn dir-right">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2.5">
+                                                <polyline points="9 18 15 12 9 6" />
+                                            </svg>
+                                            <span>RGT</span>
+                                        </div>
+                                    </div>
+                                    <div class="hud-row">
+                                        <div id="dir-btn-backward" class="hud-btn dir-backward">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2.5">
+                                                <polyline points="6 9 12 15 18 9" />
+                                            </svg>
+                                            <span>REV</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Center: Futuristic Cyberpunk Vehicle SVG Graphic -->
+                            <div class="vehicle-visualization-area">
+                                <div class="holo-road-track">
+                                    <div class="holo-lane holo-lane-left"></div>
+                                    <div class="holo-lane holo-lane-center"></div>
+                                    <div class="holo-lane holo-lane-right"></div>
+                                </div>
+                                <div class="holo-ring holo-ring-outer"></div>
+                                <div class="holo-ring holo-ring-inner"></div>
+
+                                <div id="vehicle-svg-wrapper" class="vehicle-svg-wrapper" data-motion="stop">
+                                    <div class="ambient-glow"></div>
+                                    <div class="grid-scanline"></div>
+
+                                    <!-- Futuristic Car Top-Down SVG -->
+                                    <svg class="vehicle-topdown-svg" viewBox="0 0 200 320" fill="none"
+                                        xmlns="http://www.w3.org/2000/svg">
+                                        <defs>
+                                            <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                                <stop offset="0%" stop-color="#0f172a" />
+                                                <stop offset="50%" stop-color="#1e293b" />
+                                                <stop offset="100%" stop-color="#090d16" />
+                                            </linearGradient>
+                                            <linearGradient id="neonCyan" x1="0%" y1="0%" x2="100%" y2="0%">
+                                                <stop offset="0%" stop-color="#00f0ff" />
+                                                <stop offset="100%" stop-color="#0077fe" />
+                                            </linearGradient>
+                                            <linearGradient id="headBeamGrad" x1="0%" y1="100%" x2="0%" y2="0%">
+                                                <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.55" />
+                                                <stop offset="100%" stop-color="#00f0ff" stop-opacity="0" />
+                                            </linearGradient>
+                                            <linearGradient id="tailBeamGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                                                <stop offset="0%" stop-color="#ef4444" stop-opacity="0.55" />
+                                                <stop offset="100%" stop-color="#ef4444" stop-opacity="0" />
+                                            </linearGradient>
+                                            <linearGradient id="servoSweepGrad" x1="0%" y1="100%" x2="0%" y2="0%">
+                                                <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.35" />
+                                                <stop offset="100%" stop-color="#00f0ff" stop-opacity="0" />
+                                            </linearGradient>
+                                            <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+                                                <feGaussianBlur stdDeviation="4" result="blur" />
+                                                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                                            </filter>
+                                        </defs>
+
+                                        <!-- Headlight volumetric projection cones -->
+                                        <polygon class="headlight-beam headlight-beam-l" points="62,48 76,48 86,2 44,2" fill="url(#headBeamGrad)" />
+                                        <polygon class="headlight-beam headlight-beam-r" points="124,48 138,48 156,2 114,2" fill="url(#headBeamGrad)" />
+
+                                        <!-- Reverse / Tail light projection -->
+                                        <polygon class="taillight-beam" points="65,282 135,282 152,318 48,318" fill="url(#tailBeamGrad)" />
+
+                                        <!-- Thruster / Exhaust streaks -->
+                                        <line class="exhaust-streak exhaust-l" x1="74" y1="284" x2="74" y2="314" stroke="#00f0ff" stroke-width="2" stroke-linecap="round" />
+                                        <line class="exhaust-streak exhaust-r" x1="126" y1="284" x2="126" y2="314" stroke="#00f0ff" stroke-width="2" stroke-linecap="round" />
+
+                                        <!-- Servo ultrasonic beam cone (rotates with real servo angle) -->
+                                        <g id="nose-servo-beam" class="nose-servo-beam">
+                                            <polygon points="100,48 78,4 122,4" fill="url(#servoSweepGrad)" />
+                                        </g>
+
+                                        <!-- Sonar waves ahead -->
+                                        <path class="sonar-wave sonar-1" d="M70 30 Q100 10 130 30" stroke="#00f0ff"
+                                            stroke-width="2" stroke-linecap="round" opacity="0.8" />
+                                        <path class="sonar-wave sonar-2" d="M50 20 Q100 -5 150 20" stroke="#00f0ff"
+                                            stroke-width="1.5" stroke-linecap="round" opacity="0.5" />
+                                        <path class="sonar-wave sonar-3" d="M34 12 Q100 -18 166 12" stroke="#00f0ff"
+                                            stroke-width="1.2" stroke-linecap="round" opacity="0.35" />
+
+                                        <!-- Obstacle shield arc (visible when blocked) -->
+                                        <path class="obstacle-shield" d="M44 36 Q100 12 156 36" stroke="#ef4444"
+                                            stroke-width="3" stroke-linecap="round" fill="none" />
+
+                                        <!-- Turn vector arcs -->
+                                        <path class="turn-arc turn-arc-left" d="M58 60 Q28 45 20 20" stroke="#00f0ff" stroke-width="2" stroke-dasharray="4 4" stroke-linecap="round" fill="none" />
+                                        <path class="turn-arc turn-arc-right" d="M142 60 Q172 45 180 20" stroke="#00f0ff" stroke-width="2" stroke-dasharray="4 4" stroke-linecap="round" fill="none" />
+
+                                        <!-- Wheels -->
+                                        <!-- Front Left (steers on left/right) -->
+                                        <g class="wheel-steer-fl">
+                                            <rect x="24" y="60" width="16" height="42" rx="4" fill="#1e293b"
+                                                stroke="#00f0ff" stroke-width="1.5" class="wheel wheel-fl" />
+                                        </g>
+                                        <!-- Front Right (steers on left/right) -->
+                                        <g class="wheel-steer-fr">
+                                            <rect x="160" y="60" width="16" height="42" rx="4" fill="#1e293b"
+                                                stroke="#00f0ff" stroke-width="1.5" class="wheel wheel-fr" />
+                                        </g>
+                                        <!-- Rear Left (Motor A) -->
+                                        <rect x="22" y="220" width="18" height="48" rx="4" fill="#0f172a"
+                                            stroke="#00f0ff" stroke-width="2" class="wheel wheel-rl" />
+                                        <!-- Rear Right (Motor B) -->
+                                        <rect x="160" y="220" width="18" height="48" rx="4" fill="#0f172a"
+                                            stroke="#00f0ff" stroke-width="2" class="wheel wheel-rr" />
+
+                                        <!-- Chassis Main Body -->
+                                        <path d="M60 50 L140 50 L155 90 L160 210 L145 280 L55 280 L40 210 L45 90 Z"
+                                            fill="url(#bodyGrad)" stroke="#334155" stroke-width="2" />
+
+                                        <!-- Cyberpunk Neon Trim & Neon Accents -->
+                                        <path class="chassis-neon-trim" d="M65 55 L135 55 L148 90 L150 205 L138 270 L62 270 L50 205 L52 90 Z"
+                                            stroke="url(#neonCyan)" stroke-width="2" filter="url(#neonGlow)" />
+
+                                        <!-- Racing hood lines -->
+                                        <path d="M84 62 L84 92 M116 62 L116 92" stroke="#00f0ff" stroke-width="1" stroke-opacity="0.45" stroke-linecap="round" />
+
+                                        <!-- Cockpit Glass Canopy -->
+                                        <polygon points="75,100 125,100 135,170 65,170" fill="#0284c7"
+                                            fill-opacity="0.25" stroke="#38bdf8" stroke-width="1.5" />
+                                        <path d="M80 110 L120 110" stroke="#ffffff" stroke-width="1"
+                                            stroke-linecap="round" opacity="0.4" />
+
+                                        <!-- Rear energy core reactor -->
+                                        <polygon class="energy-core" points="100,192 115,212 100,232 85,212" fill="rgba(0, 240, 255, 0.22)" stroke="#00f0ff" stroke-width="1.2" />
+
+                                        <!-- Headlight Projectors -->
+                                        <polygon points="62,48 76,48 72,55 64,55" fill="#00f0ff" class="headlight-l" />
+                                        <polygon points="124,48 138,48 136,55 128,55" fill="#00f0ff"
+                                            class="headlight-r" />
+
+                                        <!-- Rear Tail LED Bar -->
+                                        <rect x="65" y="278" width="70" height="4" rx="2" fill="#ef4444"
+                                            class="taillight" />
+
+                                        <!-- Ultrasonic Sensor Visual (Nose) -->
+                                        <circle cx="92" cy="48" r="3.5" fill="#00f0ff" />
+                                        <circle cx="108" cy="48" r="3.5" fill="#00f0ff" />
+                                        <rect x="85" y="45" width="30" height="6" rx="2" fill="none" stroke="#00f0ff"
+                                            stroke-width="1" />
+                                    </svg>
+                                </div>
+                            </div>
+
+                            <!-- Right: Real-time Differential Motor Gauges -->
+                            <div class="motor-gauges-panel">
+                                <span class="panel-section-title">DRIVE POWERTRAIN</span>
+
+                                <div class="motor-spec-box">
+                                    <div class="motor-label-row">
+                                        <span class="motor-tag">MOTOR A (LEFT)</span>
+                                        <span id="val-motor-a-pct" class="font-mono text-cyan">--</span>
+                                    </div>
+                                    <div class="progress-bar-container">
+                                        <div id="bar-motor-a" class="progress-bar-fill" style="width: 0%;"></div>
+                                    </div>
+                                    <div class="motor-pwm-val">
+                                        <span class="text-xs text-muted">PWM DUTY:</span>
+                                        <span id="val-motor-a" class="font-mono text-primary font-bold">--</span>
+                                        <span class="text-xs text-muted">/ 255</span>
+                                    </div>
+                                </div>
+
+                                <div class="motor-spec-box">
+                                    <div class="motor-label-row">
+                                        <span class="motor-tag">MOTOR B (RIGHT)</span>
+                                        <span id="val-motor-b-pct" class="font-mono text-cyan">--</span>
+                                    </div>
+                                    <div class="progress-bar-container">
+                                        <div id="bar-motor-b" class="progress-bar-fill" style="width: 0%;"></div>
+                                    </div>
+                                    <div class="motor-pwm-val">
+                                        <span class="text-xs text-muted">PWM DUTY:</span>
+                                        <span id="val-motor-b" class="font-mono text-primary font-bold">--</span>
+                                        <span class="text-xs text-muted">/ 255</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- LIVE CAMERA FEED PANEL -->
+                    <div class="card camera-feed-card">
+                        <div class="card-header">
+                            <div class="chart-title-group">
+                                <span id="cam-live-dot" class="indicator-dot text-danger"></span>
+                                <h3>LIVE CAMERA FEED</h3>
+                            </div>
+                            <div class="camera-actions">
+                                <span id="cam-status-badge" class="status-badge badge-danger">STREAM UNAVAILABLE</span>
+                                <button id="cam-reconnect-btn" class="btn-mode-toggle" type="button">Reconnect</button>
+                                <button id="cam-fullscreen-btn" class="btn-mode-toggle" type="button"
+                                    aria-label="Fullscreen camera">Fullscreen</button>
+                            </div>
+                        </div>
+
+                        <div id="camera-viewport" class="camera-viewport">
+                            <div id="cam-offline-state" class="cam-offline-state">
+                                <svg class="cam-offline-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="1.5">
+                                    <path
+                                        d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                                    <circle cx="12" cy="13" r="4" />
+                                    <line x1="2" y1="2" x2="22" y2="22" />
+                                </svg>
+                                <div id="cam-offline-msg" class="cam-offline-msg">STREAM UNAVAILABLE</div>
+                                <div id="cam-offline-sub" class="text-xs text-muted">Waiting for ESP32-CAM video stream
+                                    via backend</div>
+                            </div>
+                            <img id="cam-feed" alt="ESP32-CAM live video stream">
+                            <div id="cam-reconnecting-overlay" class="cam-reconnecting-overlay hidden">
+                                <div class="cam-spinner"></div>
+                                <span class="text-xs font-mono text-cyan">RECONNECTING CAMERA…</span>
+                            </div>
+                        </div>
+
+                        <div class="camera-footer">
+                            <span id="cam-info-text" class="text-xs font-mono text-muted">Camera: STREAM
+                                UNAVAILABLE</span>
+                            <span id="cam-fps-text" class="text-xs font-mono text-muted">FPS: --</span>
+                        </div>
+                    </div>
+
+                    <!-- 6 Sensor Summary Cards Grid -->
+                    <div class="sensors-grid">
+                        <!-- 1. Temperature Card -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-cyan">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">TEMPERATURE</span>
+                                <span id="status-temperature" class="status-badge badge-warning">NO SIGNAL</span>
+                            </div>
+                            <div class="sensor-value-large">
+                                <span id="val-temperature" class="font-mono">--</span>
+                                <span class="unit">°C</span>
+                            </div>
+                            <div class="sensor-metric-track">
+                                <div class="progress-bar-container">
+                                    <div id="bar-temperature" class="progress-bar-fill fill-gradient-cyan"
+                                        style="width: 0%;"></div>
+                                </div>
+                                <div class="range-labels">
+                                    <span>15°C</span>
+                                    <span>30°C</span>
+                                    <span>45°C</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 2. Humidity Card with Circular SVG Progress -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-teal">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">HUMIDITY</span>
+                                <span id="status-humidity" class="status-badge badge-warning">NO SIGNAL</span>
+                            </div>
+                            <div class="circular-progress-wrapper">
+                                <svg class="progress-ring" width="90" height="90">
+                                    <circle class="progress-ring-bg" stroke="rgba(255,255,255,0.08)" stroke-width="7"
+                                        fill="transparent" r="38" cx="45" cy="45" />
+                                    <circle id="circle-humidity-progress" class="progress-ring-circle" stroke="#10b981"
+                                        stroke-width="7" stroke-dasharray="238.76" stroke-dashoffset="238.76"
+                                        stroke-linecap="round" fill="transparent" r="38" cx="45" cy="45" />
+                                </svg>
+                                <div class="circle-inner-value">
+                                    <span id="val-humidity" class="font-mono text-xl font-bold">--</span>
+                                    <span class="unit-sub">%</span>
+                                </div>
+                            </div>
+                            <div class="sensor-footer-desc text-xs text-muted text-center">DHT11 Relative Air Humidity
+                            </div>
+                        </div>
+
+                        <!-- 3. Gas Sensor Card -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-amber">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">GAS SENSOR (MQ)</span>
+                                <span id="badge-gas-status" class="status-badge badge-warning">NO SIGNAL</span>
+                            </div>
+                            <div class="sensor-value-large">
+                                <span id="val-gas" class="font-mono">--</span>
+                                <span class="unit">ADC</span>
+                            </div>
+                            <div class="sensor-metric-track">
+                                <div class="progress-bar-container">
+                                    <div id="bar-gas" class="progress-bar-fill fill-gradient-amber" style="width: 0%;">
+                                    </div>
+                                </div>
+                                <div class="range-labels">
+                                    <span>0 (Safe)</span>
+                                    <span id="val-gas-pct">--</span>
+                                    <span>4095 (Max)</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 4. Ultrasonic Sonar Distance Card with Radar Visual -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-violet">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 2a10 10 0 1 0 10 10H12V2z" />
+                                        <path d="M12 12L2.5 7.5" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">ULTRASONIC PROXIMITY</span>
+                                <span id="badge-distance-status" class="status-badge badge-warning">NO SIGNAL</span>
+                            </div>
+                            <div class="distance-sensor-body">
+                                <div class="sensor-value-large">
+                                    <span id="val-distance" class="font-mono">--</span>
+                                    <span class="unit">cm</span>
+                                </div>
+                                <div id="radar-ultrasonic" class="radar-box">
+                                    <div class="radar-sweep"></div>
+                                    <div class="radar-circle radar-c1"></div>
+                                    <div class="radar-circle radar-c2"></div>
+                                    <div class="radar-circle radar-c3"></div>
+                                </div>
+                            </div>
+                            <div id="distance-threshold-desc" class="sensor-footer-desc text-xs text-muted">Obstacle
+                                Alert Threshold: &le; 20.0 cm</div>
+                        </div>
+
+                        <!-- 5. Motor A Summary Card -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-cyan">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10" />
+                                        <polyline points="12 6 12 12 16 14" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">LEFT DRIVE (MOTOR A)</span>
+                                <span id="badge-motor-a-status" class="status-badge badge-cyan">CHANNEL A</span>
+                            </div>
+                            <div class="sensor-value-large">
+                                <span id="val-motor-a-card" class="font-mono">--</span>
+                            </div>
+                            <div class="sensor-footer-desc text-xs text-muted">L298N Dual H-Bridge PWM Driver Channel 1
+                            </div>
+                        </div>
+
+                        <!-- 6. Motor B Summary Card -->
+                        <div class="sensor-card">
+                            <div class="sensor-card-header">
+                                <div class="sensor-icon-wrapper text-cyan">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10" />
+                                        <polyline points="12 6 12 12 16 14" />
+                                    </svg>
+                                </div>
+                                <span class="sensor-title">RIGHT DRIVE (MOTOR B)</span>
+                                <span id="badge-motor-b-status" class="status-badge badge-cyan">CHANNEL B</span>
+                            </div>
+                            <div class="sensor-value-large">
+                                <span id="val-motor-b-card" class="font-mono">--</span>
+                            </div>
+                            <div class="sensor-footer-desc text-xs text-muted">L298N Dual H-Bridge PWM Driver Channel 2
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================== -->
+                <!-- 2. LIVE TELEMETRY VIEW -->
+                <!-- ============================================================== -->
+                <section id="view-telemetry" class="view-section hidden">
+                    <div class="telemetry-view-layout">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Full Telemetry Packet Registry</h3>
+                                <span class="text-xs text-muted">Validated Ingestion Fields</span>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="telemetry-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Telemetry Field</th>
+                                            <th>Current Reading</th>
+                                            <th>Technical Description</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="live-telemetry-tbody">
+                                        <tr>
+                                            <td colspan="3" class="text-muted text-xs"
+                                                style="padding:20px;text-align:center">Waiting for backend telemetry...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Raw Telemetry JSON Inspector</h3>
+                                <span class="text-xs text-muted">Schema-validated JSON</span>
+                            </div>
+                            <div class="json-inspector-box">
+                                <pre id="raw-json-inspector" class="font-mono text-xs">Waiting for packet...</pre>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================== -->
+                <!-- 3. SENSOR ANALYTICS VIEW -->
+                <!-- ============================================================== -->
+                <section id="view-analytics" class="view-section hidden">
+                    <div class="charts-2x2-grid">
+                        <!-- Chart 1: Temperature -->
+                        <div class="card chart-card">
+                            <div class="card-header">
+                                <div class="chart-title-group">
+                                    <span class="indicator-dot dot-cyan"></span>
+                                    <h3>Temperature History (°C)</h3>
+                                </div>
+                                <span class="badge-tag">DHT11 SENSOR</span>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="chart-temperature"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 2: Humidity -->
+                        <div class="card chart-card">
+                            <div class="card-header">
+                                <div class="chart-title-group">
+                                    <span class="indicator-dot dot-teal"></span>
+                                    <h3>Relative Humidity History (%)</h3>
+                                </div>
+                                <span class="badge-tag">DHT11 SENSOR</span>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="chart-humidity"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 3: Gas Sensor -->
+                        <div class="card chart-card">
+                            <div class="card-header">
+                                <div class="chart-title-group">
+                                    <span class="indicator-dot dot-amber"></span>
+                                    <h3>MQ Gas Analog History (ADC)</h3>
+                                </div>
+                                <span class="badge-tag">RANGE: 0 - 4095</span>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="chart-gas"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 4: Ultrasonic Distance -->
+                        <div class="card chart-card">
+                            <div class="card-header">
+                                <div class="chart-title-group">
+                                    <span class="indicator-dot dot-violet"></span>
+                                    <h3>Ultrasonic Distance Trend (cm)</h3>
+                                </div>
+                                <span class="badge-tag">HC-SR04 SONAR</span>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="chart-distance"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================== -->
+                <!-- 4. SAFETY & ALERTS VIEW -->
+                <!-- ============================================================== -->
+                <section id="view-safety" class="view-section hidden">
+                    <div class="safety-grid">
+                        <div class="safety-conditions-column">
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3>Active Safety Interlocks</h3>
+                                    <span class="text-xs text-muted">Automated Threshold Monitors</span>
+                                </div>
+
+                                <div class="safety-banner-group">
+                                    <div id="safety-card-obstacle" class="safety-sub-box">
+                                        <div class="safety-sub-title">1. Proximity Interlock</div>
+                                        <div id="safety-obstacle-status" class="status-banner banner-warning">
+                                            NO SIGNAL (Waiting for Ultrasonic Sensor)
+                                        </div>
+                                    </div>
+
+                                    <div id="safety-card-gas" class="safety-sub-box">
+                                        <div class="safety-sub-title">2. Air Quality &amp; Flammable Gas</div>
+                                        <div id="safety-gas-status" class="status-banner banner-warning">
+                                            NO SIGNAL (Waiting for MQ Gas Sensor)
+                                        </div>
+                                    </div>
+
+                                    <div id="safety-card-movement" class="safety-sub-box">
+                                        <div class="safety-sub-title">3. Forward Collision Interlock</div>
+                                        <div id="safety-movement-status" class="status-banner banner-warning">
+                                            NO SIGNAL (Waiting for Vehicle Controller)
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="safety-feed-column">
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3>Recent Safety Events Log</h3>
+                                    <span class="text-xs text-muted">Real-time alert dispatch</span>
+                                </div>
+                                <div id="alerts-feed-list" class="alerts-feed-list">
+                                    <div class="text-xs text-muted" style="padding: 16px; text-align: center;">No safety
+                                        alerts recorded.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================== -->
+                <!-- 5. DEVICE INFORMATION VIEW -->
+                <!-- ============================================================== -->
+                <section id="view-device" class="view-section hidden">
+                    <div class="device-info-layout">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Hardware Specifications</h3>
+                                <span class="badge-tag">NODE MCU 30-PIN</span>
+                            </div>
+                            <div class="info-key-val-grid">
+                                <div class="info-item">
+                                    <span class="info-label">Vehicle ID</span>
+                                    <span id="info-device-id"
+                                        class="info-val font-mono text-cyan">GLOVEDRIVE-ESP32-01</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Microcontroller</span>
+                                    <span class="info-val">ESP32-WROOM-32 (Dual Core 240MHz)</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Wireless Subsystem</span>
+                                    <span class="info-val">ESP-NOW (Glove → Rover) + WiFi WebSocket</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Motor Controller</span>
+                                    <span class="info-val">L298N Dual H-Bridge Motor Driver</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Sensors Deployed</span>
+                                    <span class="info-val">HC-SR04 Sonar, DHT11 Thermal, MQ Gas, ESP32-CAM</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Telemetry Interval</span>
+                                    <span class="info-val">200 ms (5.0 Hz)</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Gateway &amp; Cloud Backend Diagnostic</h3>
+                                <span class="badge-tag">FASTAPI CLOUD</span>
+                            </div>
+                            <div class="info-key-val-grid">
+                                <div class="info-item">
+                                    <span class="info-label">Active Dashboard Mode</span>
+                                    <span id="info-mode" class="info-val font-semibold text-cyan">LIVE (Hardware
+                                        Backend)</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Backend Health Status</span>
+                                    <span id="info-backend-status" class="info-val text-muted">OFFLINE</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">WebSocket Stream Status</span>
+                                    <span id="info-ws-status" class="info-val text-muted">Disconnected</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Packets Processed (Session)</span>
+                                    <span id="info-packet-count" class="info-val font-mono">0</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Total Telemetry Records (DB / Hist)</span>
+                                    <span id="info-total-records" class="info-val font-mono">0</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Active Safety Alerts</span>
+                                    <span id="info-active-alerts" class="info-val font-mono text-amber">0</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Last Transmission Timestamp</span>
+                                    <span id="info-last-time" class="info-val font-mono text-xs">-</span>
+                                </div>
+                                <div class="info-item full-width">
+                                    <span class="info-label">Backend API URL</span>
+                                    <span id="info-gateway-url"
+                                        class="info-val font-mono text-xs text-muted">http://127.0.0.1:8000</span>
+                                    <div class="url-edit-row">
+                                        <input type="text" id="input-backend-url" class="text-input font-mono" value=""
+                                            placeholder="http://127.0.0.1:8000">
+                                        <button id="btn-save-backend-url" class="btn-primary" type="button">Update
+                                            Endpoint</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card" style="grid-column: 1 / -1;">
+                            <div class="card-header">
+                                <h3>System Nodes Diagnostics</h3>
+                                <span class="badge-tag">REAL-TIME LINK METRICS</span>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="telemetry-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Node</th>
+                                            <th>Status</th>
+                                            <th>Protocol</th>
+                                            <th>IP</th>
+                                            <th>Msg/s</th>
+                                            <th>RTT</th>
+                                            <th>RSSI</th>
+                                            <th>Lost</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="nodes-detail-tbody">
+                                        <tr>
+                                            <td colspan="8" class="text-muted text-xs"
+                                                style="padding:14px;text-align:center">Waiting for backend connection...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- Application JavaScript Modules -->
+    <script src="/js/api.js?v=5"></script>
+    <script src="/js/charts.js?v=5"></script>
+    <script src="/js/camera.js?v=5"></script>
+    <script src="/js/app.js?v=5"></script>
+</body>
+
+</html>
