@@ -1759,11 +1759,23 @@ body {
 }
 
 .alerts-feed-list {
+    position: relative;
+    max-height: 360px;
+    overflow-y: hidden;
+    padding-right: 4px;
+    scroll-behavior: auto;
+}
+
+.alerts-feed-list:hover,
+.alerts-feed-list:focus-within {
+    overflow-y: auto;
+}
+
+.alerts-scroll-track {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-height: 450px;
-    overflow-y: auto;
+    will-change: transform;
 }
 
 .alert-item {
@@ -2317,11 +2329,25 @@ body {
     animation: warnBannerPulse 2.4s ease-in-out infinite alternate;
 }
 .alert-item {
-    animation: slideInRightFade 0.35s cubic-bezier(0.16, 1, 0.3, 1) backwards;
-    transition: transform 0.18s ease, border-color 0.18s ease;
+    transition: opacity 0.42s ease, transform 0.18s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+.alert-item.alert-item--new {
+    animation: alertArriveFade 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .alert-item:hover {
     transform: translateX(3px);
+}
+@keyframes alertArriveFade {
+    0% {
+        opacity: 0;
+        transform: translateY(-10px);
+        box-shadow: 0 0 18px rgba(0, 240, 255, 0.28);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0);
+        box-shadow: none;
+    }
 }
 
 /* Device Info & Session History KPI + PDF button shine */

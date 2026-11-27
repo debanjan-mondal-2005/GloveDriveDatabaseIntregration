@@ -553,8 +553,16 @@
         const container = document.getElementById('alerts-feed-list');
         if (!container) return;
 
+        _wireAlertsTicker(container);
+
         if (!alertsList || alertsList.length === 0) {
-            container.innerHTML = '<div class="text-xs text-muted" style="padding: 16px; text-align: center;">No safety alerts recorded in this session.</div>';
+            _stopAlertsTicker();
+            if (_alertsTicker.lastSig !== '__empty__') {
+                _alertsTicker.lastSig = '__empty__';
+                _alertsTicker.hasRendered = false;
+                container.scrollTop = 0;
+                container.innerHTML = '<div class="text-xs text-muted" style="padding: 16px; text-align: center;">No safety alerts recorded in this session.</div>';
+            }
             _setText('info-active-alerts', '0');
             return;
         }
@@ -562,42 +570,254 @@
         const unacked = alertsList.filter(a => !a.acked).length;
         _setText('info-active-alerts', String(unacked));
 
-        container.innerHTML = alertsList.map(a => {
-            const sev = (a.severity || 'INFO').toUpperCase();
-            const cls = sev === 'CRITICAL' ? 'alert-danger' : sev === 'ELEVATED' ? 'alert-warning' : 'alert-info';
-            const badgeCls = sev === 'CRITICAL' ? 'badge-danger' : sev === 'ELEVATED' ? 'badge-warning' : 'badge-info';
-            const timeStr = a.t ? new Date(a.t * 1000).toLocaleTimeString() : '--';
-            const ackBtn = a.id != null
-                ? `<button class="btn-ack ${a.acked ? 'acked' : ''}" data-alert-id="${a.id}" ${a.acked ? 'disabled' : ''}>${a.acked ? 'Acknowledged' : 'Acknowledge'}</button>`
-                : '';
-            return `
-                <div class="alert-item ${cls}">
-                    <div class="alert-header">
-                        <div class="alert-header-left">
-                            <span class="status-badge ${badgeCls}">${_esc(sev)}</span>
-                            <span class="font-mono text-xs text-muted">${_esc(a.source || 'SYSTEM')}</span>
-                            <span class="font-mono text-xs text-muted">${_esc(timeStr)}</span>
-                        </div>
-                        ${ackBtn}
-                    </div>
-                    <div class="text-sm text-primary">${_esc(a.message || '')}</div>
-                </div>
-            `;
-        }).join('');
+        const getKey = a => (a.id != null
+            ? `id:${a.id}`
+            : `tm:${a.t ?? ''}|${a.severity ?? ''}|${a.source ?? ''}|${a.message ?? ''}`);
 
-        container.querySelectorAll('.btn-ack:not([disabled])').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const id = btn.dataset.alertId;
+        const fullSig = alertsList
+            .map(a => `${getKey(a)}:${a.acked ? 1 : 0}`)
+            .join(';;');
+
+        if (fullSig === _alertsTicker.lastSig && container.querySelector('.alerts-scroll-track')) {
+            _startAlertsTicker();
+            return;
+        }
+        _alertsTicker.lastSig = fullSig;
+
+        let track = container.querySelector('.alerts-scroll-track');
+        if (!track) {
+            container.innerHTML = '';
+            track = document.createElement('div');
+            track.className = 'alerts-scroll-track';
+            container.appendChild(track);
+        }
+
+        const existingMap = new Map();
+        Array.from(track.querySelectorAll('.alert-item[data-alert-key]')).forEach(el => {
+            existingMap.set(el.dataset.alertKey, el);
+        });
+
+        let hasNewEntries = false;
+        let hasOrderOrRemovalChange = existingMap.size !== alertsList.length;
+        const nextKeysSet = new Set();
+        const orderedNodes = alertsList.map(a => {
+            const key = getKey(a);
+            nextKeysSet.add(key);
+            const existing = existingMap.get(key);
+            if (existing) {
+                const btn = existing.querySelector('.btn-ack');
+                if (btn) {
+                    const isAcked = Boolean(a.acked);
+                    btn.classList.toggle('acked', isAcked);
+                    btn.textContent = isAcked ? 'Acknowledged' : 'Acknowledge';
+                    btn.disabled = isAcked;
+                }
+                return existing;
+            }
+            hasNewEntries = true;
+            hasOrderOrRemovalChange = true;
+            return _buildAlertItemNode(a, key, _alertsTicker.hasRendered);
+        });
+
+        if (hasNewEntries || hasOrderOrRemovalChange) {
+            if (hasNewEntries) {
+                // Bring track cleanly to top so new alerts appear immediately without jump or skip
+                track.style.transform = 'translate3d(0, 0, 0)';
+                container.scrollTop = 0;
+                _alertsTicker.phase = 'dwell';
+                _alertsTicker.elapsedMs = 0;
+                _alertsTicker.stepPx = 0;
+                orderedNodes.forEach(node => { node.style.opacity = ''; });
+            }
+            track.replaceChildren(...orderedNodes);
+        }
+
+        _alertsTicker.hasRendered = true;
+        if (orderedNodes.length >= 2) {
+            _startAlertsTicker();
+        } else {
+            _stopAlertsTicker();
+        }
+    }
+
+    const _alertsTicker = {
+        raf: null,
+        lastTs: 0,
+        phase: 'dwell',
+        elapsedMs: 0,
+        stepPx: 0,
+        isHovered: false,
+        isFocused: false,
+        hasRendered: false,
+        lastSig: '',
+        DWELL_MS: 3200,
+        SCROLL_MS: 1050,
+    };
+
+    function _buildAlertItemNode(a, key, animateArrival) {
+        const sev = (a.severity || 'INFO').toUpperCase();
+        const cls = sev === 'CRITICAL' ? 'alert-danger' : sev === 'ELEVATED' ? 'alert-warning' : 'alert-info';
+        const badgeCls = sev === 'CRITICAL' ? 'badge-danger' : sev === 'ELEVATED' ? 'badge-warning' : 'badge-info';
+        const timeStr = a.t ? new Date(a.t * 1000).toLocaleTimeString() : '--';
+        const ackBtnHtml = a.id != null
+            ? `<button class="btn-ack ${a.acked ? 'acked' : ''}" data-alert-id="${a.id}" ${a.acked ? 'disabled' : ''}>${a.acked ? 'Acknowledged' : 'Acknowledge'}</button>`
+            : '';
+
+        const item = document.createElement('div');
+        item.className = `alert-item ${cls}${animateArrival ? ' alert-item--new' : ''}`;
+        item.dataset.alertKey = key;
+        item.innerHTML = `
+            <div class="alert-header">
+                <div class="alert-header-left">
+                    <span class="status-badge ${badgeCls}">${_esc(sev)}</span>
+                    <span class="font-mono text-xs text-muted">${_esc(a.source || 'SYSTEM')}</span>
+                    <span class="font-mono text-xs text-muted">${_esc(timeStr)}</span>
+                </div>
+                ${ackBtnHtml}
+            </div>
+            <div class="text-sm text-primary">${_esc(a.message || '')}</div>
+        `;
+
+        if (animateArrival) {
+            item.addEventListener('animationend', () => item.classList.remove('alert-item--new'), { once: true });
+        }
+
+        const ackBtn = item.querySelector('.btn-ack:not([disabled])');
+        if (ackBtn) {
+            ackBtn.addEventListener('click', async () => {
+                const id = ackBtn.dataset.alertId;
                 try {
                     await API.ackAlert(id);
-                    btn.classList.add('acked');
-                    btn.textContent = 'Acknowledged';
-                    btn.disabled = true;
+                    ackBtn.classList.add('acked');
+                    ackBtn.textContent = 'Acknowledged';
+                    ackBtn.disabled = true;
                 } catch (err) {
                     console.warn('[Alerts] Ack failed:', err.message);
                 }
             });
+        }
+        return item;
+    }
+
+    function _wireAlertsTicker(container) {
+        if (!container || container.dataset.tickerWired === '1') return;
+        container.dataset.tickerWired = '1';
+        container.addEventListener('mouseenter', () => {
+            _alertsTicker.isHovered = true;
         });
+        container.addEventListener('mouseleave', () => {
+            _alertsTicker.isHovered = false;
+        });
+        container.addEventListener('focusin', () => {
+            _alertsTicker.isFocused = true;
+        });
+        container.addEventListener('focusout', e => {
+            if (!e.relatedTarget || !container.contains(e.relatedTarget)) {
+                _alertsTicker.isFocused = false;
+            }
+        });
+    }
+
+    function _startAlertsTicker() {
+        if (_alertsTicker.raf !== null) return;
+        _alertsTicker.lastTs = performance.now();
+
+        function step(now) {
+            const appEl = document.getElementById('app-shell');
+            const container = document.getElementById('alerts-feed-list');
+            const track = container ? container.querySelector('.alerts-scroll-track') : null;
+            if (!appEl || appEl.classList.contains('hidden') || !container || !track || track.children.length < 2) {
+                if (track) track.style.transform = 'translate3d(0, 0, 0)';
+                _alertsTicker.phase = 'dwell';
+                _alertsTicker.elapsedMs = 0;
+                _alertsTicker.stepPx = 0;
+                _alertsTicker.raf = null;
+                return;
+            }
+
+            const dtMs = Math.min(50, Math.max(1, now - _alertsTicker.lastTs));
+            _alertsTicker.lastTs = now;
+
+            if (container.offsetParent === null) {
+                track.style.transform = 'translate3d(0, 0, 0)';
+                _alertsTicker.phase = 'dwell';
+                _alertsTicker.elapsedMs = 0;
+                _alertsTicker.stepPx = 0;
+                _alertsTicker.raf = requestAnimationFrame(step);
+                return;
+            }
+
+            if (_alertsTicker.isHovered || _alertsTicker.isFocused) {
+                _alertsTicker.raf = requestAnimationFrame(step);
+                return;
+            }
+
+            if (container.scrollTop > 0.5) {
+                const easeRate = 1 - Math.exp(-dtMs * 0.012);
+                container.scrollTop = Math.max(0, container.scrollTop - Math.max(1, container.scrollTop * easeRate));
+                if (container.scrollTop <= 0.5) container.scrollTop = 0;
+                _alertsTicker.raf = requestAnimationFrame(step);
+                return;
+            }
+
+            const overflowing = track.scrollHeight > container.clientHeight + 4;
+            const firstEl = track.firstElementChild;
+            const secondEl = firstEl ? firstEl.nextElementSibling : null;
+
+            if (_alertsTicker.phase === 'dwell') {
+                _alertsTicker.elapsedMs += dtMs;
+                track.style.transform = 'translate3d(0, 0, 0)';
+                if (_alertsTicker.elapsedMs >= _alertsTicker.DWELL_MS && firstEl && secondEl) {
+                    _alertsTicker.stepPx = Math.max(24, secondEl.offsetTop - firstEl.offsetTop);
+                    _alertsTicker.phase = 'scroll';
+                    _alertsTicker.elapsedMs = 0;
+                }
+            } else {
+                _alertsTicker.elapsedMs += dtMs;
+                const u = Math.min(1, _alertsTicker.elapsedMs / _alertsTicker.SCROLL_MS);
+                const eased = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+                const offsetY = eased * _alertsTicker.stepPx;
+                track.style.transform = `translate3d(0, ${(-offsetY).toFixed(2)}px, 0)`;
+
+                if (!overflowing && firstEl) {
+                    firstEl.style.opacity = String(Math.max(0.08, 1 - eased).toFixed(2));
+                }
+
+                if (u >= 1) {
+                    if (firstEl) {
+                        track.appendChild(firstEl);
+                        if (!overflowing) {
+                            firstEl.style.opacity = '0';
+                            void firstEl.offsetHeight;
+                            firstEl.style.opacity = '';
+                        } else {
+                            firstEl.style.opacity = '';
+                        }
+                    }
+                    track.style.transform = 'translate3d(0, 0, 0)';
+                    _alertsTicker.phase = 'dwell';
+                    _alertsTicker.elapsedMs = 0;
+                    _alertsTicker.stepPx = 0;
+                }
+            }
+
+            _alertsTicker.raf = requestAnimationFrame(step);
+        }
+
+        _alertsTicker.raf = requestAnimationFrame(step);
+    }
+
+    function _stopAlertsTicker() {
+        if (_alertsTicker.raf !== null) {
+            cancelAnimationFrame(_alertsTicker.raf);
+            _alertsTicker.raf = null;
+        }
+        _alertsTicker.phase = 'dwell';
+        _alertsTicker.elapsedMs = 0;
+        _alertsTicker.stepPx = 0;
+        const container = document.getElementById('alerts-feed-list');
+        const track = container ? container.querySelector('.alerts-scroll-track') : null;
+        if (track) track.style.transform = 'translate3d(0, 0, 0)';
     }
 
     /* ── Live Telemetry Table & JSON Inspector ───────────────── */
@@ -1621,6 +1841,7 @@
 
     function _showAuthScreen(noticeMsg) {
         _stopDashSceneAnimation();
+        _stopAlertsTicker();
         const authEl = document.getElementById('auth-screen');
         const appEl = document.getElementById('app-shell');
         if (appEl) appEl.classList.add('hidden');
