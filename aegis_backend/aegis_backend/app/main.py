@@ -87,6 +87,8 @@ def telemetry():
     return dict(device_id=UNIT, mode="LIVE", command=DIRS.get(g.get("command", "S"), "IDLE"),
                 control_lock="HUB_ESTOP" if state["estop"] else "GLOVE_ESPNOW",
                 direction=DIRS.get(m.get("dir", "S"), "IDLE"),
+                speed_a=int(m.get("speedA", 0)),          # motor-A PWM 0-100%
+                speed_b=int(m.get("speedB", 0)),          # motor-B PWM 0-100%
                 front_dist_cm=min(int(m.get("distance_cm", 999)), 999),
                 temp_c=float(m.get("temp_c") or 0), humidity_pct=float(m.get("hum_pct") or 0),
                 gas_raw=int(m.get("gas_raw", 0)), rssi_dbm=int(devs["main"]["rssi"] or 0),
