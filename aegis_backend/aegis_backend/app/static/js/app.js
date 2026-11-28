@@ -85,6 +85,7 @@
         _initMobileSidebar();
         _initEStop();
         _initControls();
+        _initLocationMap();
         _initSessionHistory();
         _initInteractiveEffects();
         _initAuth();
@@ -169,6 +170,8 @@
             }
         } else if (target === 'device') {
             _loadSessionHistory();
+        } else if (target === 'overview') {
+            setTimeout(_invalidateLocMapSize, 60);
         }
     }
 
@@ -249,6 +252,7 @@
         }
 
         _renderAlertsFeed(snap.alerts || []);
+        _renderLocation(snap.location || null, mainConnected);
         _renderTelemetryTable(tel, mainData, gloveData, nodes, Boolean(snap.estop));
         _renderRawJson(snap);
         _renderDeviceInfo(snap, nodes, nowLabel);
@@ -990,6 +994,364 @@
         _setClass('info-ws-status', 'info-val text-danger');
 
         Camera.setOffline('STREAM UNAVAILABLE', 'Backend server disconnected');
+        _renderLocationOffline();
+    }
+
+    /* ── Live Wi-Fi Estimated Car Location Map ─────────────────── */
+    const _locState = {
+        map: null,
+        tileLayer: null,
+        marker: null,
+        circle: null,
+        lat: null,
+        lng: null,
+        acc: null,
+        warn: false,
+        userPanned: false,
+        useFallback: false,
+        tilesLoaded: 0,
+        tileErrors: 0,
+        lastGeoSig: '',
+        lastUiTextSig: '',
+    };
+
+    function _initLocationMap() {
+        const recenterBtn = document.getElementById('loc-recenter-btn');
+        if (recenterBtn && !recenterBtn.dataset.wired) {
+            recenterBtn.dataset.wired = '1';
+            recenterBtn.addEventListener('click', () => {
+                _locState.userPanned = false;
+                if (_locState.lat != null && _locState.lng != null) {
+                    _focusMapOnCar(_locState.lat, _locState.lng, _locState.acc, true);
+                }
+            });
+        }
+    }
+
+    function _invalidateLocMapSize() {
+        if (_locState.map) {
+            try { _locState.map.invalidateSize(); } catch (_) {}
+        }
+        if (_locState.useFallback && _locState.lat != null && _locState.lng != null) {
+            _drawLocationFallbackCanvas(_locState.lat, _locState.lng, _locState.acc, _locState.warn);
+        }
+    }
+
+    function _zoomForAccuracy(acc) {
+        if (acc == null) return 16;
+        if (acc <= 60) return 17;
+        if (acc <= 180) return 16;
+        if (acc <= 500) return 15;
+        if (acc <= 1500) return 13;
+        return 11;
+    }
+
+    function _ensureLeafletMap() {
+        if (_locState.useFallback || _locState.map) return Boolean(_locState.map);
+        if (typeof window.L === 'undefined') return false;
+        const mapEl = document.getElementById('location-map-canvas');
+        if (!mapEl) return false;
+
+        try {
+            const map = window.L.map(mapEl, {
+                zoomControl: true,
+                attributionControl: true,
+                zoomAnimation: true,
+            }).setView([20.5937, 78.9629], 4);
+
+            const tileLayer = window.L.tileLayer(
+                'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+                {
+                    subdomains: 'abcd',
+                    maxZoom: 19,
+                    attribution: '&copy; OpenStreetMap &copy; CARTO',
+                }
+            );
+            tileLayer.on('tileload', () => {
+                _locState.tilesLoaded += 1;
+            });
+            tileLayer.on('tileerror', () => {
+                _locState.tileErrors += 1;
+                if (_locState.tilesLoaded === 0 && _locState.tileErrors >= 6) {
+                    _activateFallbackMap();
+                }
+            });
+            tileLayer.addTo(map);
+            map.on('dragstart', () => { _locState.userPanned = true; });
+
+            _locState.map = map;
+            _locState.tileLayer = tileLayer;
+            return true;
+        } catch (_) {
+            _activateFallbackMap();
+            return false;
+        }
+    }
+
+    function _activateFallbackMap() {
+        _locState.useFallback = true;
+        const mapEl = document.getElementById('location-map-canvas');
+        const fbEl = document.getElementById('location-fallback-canvas');
+        if (mapEl) mapEl.classList.add('hidden');
+        if (fbEl) fbEl.classList.remove('hidden');
+        if (_locState.lat != null && _locState.lng != null) {
+            _drawLocationFallbackCanvas(_locState.lat, _locState.lng, _locState.acc, _locState.warn);
+        }
+    }
+
+    function _focusMapOnCar(lat, lng, acc, forceZoom) {
+        if (_locState.map && !_locState.useFallback) {
+            const zoom = _zoomForAccuracy(acc);
+            if (forceZoom || _locState.map.getZoom() < 10) {
+                _locState.map.setView([lat, lng], zoom, { animate: true });
+            } else {
+                _locState.map.panTo([lat, lng], { animate: true });
+            }
+        }
+    }
+
+    function _drawLocationFallbackCanvas(lat, lng, acc, warn) {
+        const canvas = document.getElementById('location-fallback-canvas');
+        const viewport = document.getElementById('location-map-viewport');
+        if (!canvas || !viewport) return;
+        const rect = viewport.getBoundingClientRect();
+        const w = Math.max(220, Math.round(rect.width));
+        const h = Math.max(180, Math.round(rect.height));
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+            canvas.width = Math.round(w * dpr);
+            canvas.height = Math.round(h * dpr);
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+
+        // Dark tactical coordinate grid
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.08)';
+        ctx.lineWidth = 1;
+        const step = 32;
+        ctx.beginPath();
+        for (let x = (w / 2) % step; x < w; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+        for (let y = (h / 2) % step; y < h; y += step) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+
+        const cx = w / 2;
+        const cy = h / 2;
+        const rgb = warn ? '245, 158, 11' : '0, 240, 255';
+
+        // Range rings
+        [36, 74, 112].forEach(r => {
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${rgb}, 0.16)`;
+            ctx.setLineDash([4, 5]);
+            ctx.stroke();
+        });
+        ctx.setLineDash([]);
+
+        // Accuracy radius fill
+        const accPx = acc != null ? Math.max(20, Math.min(108, Math.round(Math.log10(Math.max(10, acc)) * 28))) : 42;
+        ctx.beginPath();
+        ctx.arc(cx, cy, accPx, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb}, 0.14)`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${rgb}, 0.65)`;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        // Car marker pinpoint
+        ctx.beginPath();
+        ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+        ctx.fillStyle = warn ? '#f59e0b' : '#00f0ff';
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        // Cardinal N marker
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.75)';
+        ctx.font = '600 10px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('N', cx, 16);
+        if (lat != null && lng != null) {
+            ctx.fillStyle = 'rgba(226, 232, 240, 0.85)';
+            ctx.fillText(`${lat.toFixed(5)}, ${lng.toFixed(5)}`, cx, h - 12);
+        }
+    }
+
+    function _formatAgeShort(ageS) {
+        if (ageS == null || Number.isNaN(Number(ageS))) return '';
+        const s = Math.max(0, Math.round(Number(ageS)));
+        if (s < 5) return 'just now';
+        if (s < 60) return `${s}s ago`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m ago`;
+        const h = Math.floor(m / 60);
+        return `${h}h ${m % 60}m ago`;
+    }
+
+    function _renderLocation(loc, mainConnected) {
+        const dot = document.getElementById('loc-live-dot');
+        const badge = document.getElementById('loc-status-badge');
+        const overlay = document.getElementById('location-overlay-state');
+        const overlayTitle = document.getElementById('location-overlay-title');
+        const overlayMsg = document.getElementById('location-overlay-msg');
+        const staleBanner = document.getElementById('location-stale-banner');
+        const recenterBtn = document.getElementById('loc-recenter-btn');
+
+        const hasFix = Boolean(loc && typeof loc.lat === 'number' && typeof loc.lng === 'number' && loc.updated_at);
+        if (!hasFix) {
+            if (overlay) overlay.classList.remove('hidden');
+            if (staleBanner) staleBanner.classList.add('hidden');
+            if (recenterBtn) recenterBtn.classList.add('hidden');
+            if (dot) dot.className = 'indicator-dot text-amber';
+            if (badge) {
+                badge.className = 'status-badge badge-warning';
+                badge.textContent = (loc && loc.status === 'error') ? 'NO FIX' : 'UNAVAILABLE';
+            }
+            if (overlayTitle) {
+                overlayTitle.textContent = mainConnected ? 'SCANNING WI-FI POSITION…' : 'LOCATION UNAVAILABLE';
+            }
+            if (overlayMsg) {
+                overlayMsg.textContent = (loc && loc.error)
+                    ? loc.error
+                    : (mainConnected
+                        ? 'Collecting nearby Wi-Fi BSSIDs (updates every 30s while car is ON)'
+                        : 'Connect ESP32 Car to begin 30s Wi-Fi location updates');
+            }
+            _setText('loc-coords-val', '-- , --');
+            _setText('loc-accuracy-val', '--');
+            _setText('loc-updated-val', 'Waiting for fix');
+            return;
+        }
+
+        const stale = Boolean(loc.stale);
+        const inaccurate = Boolean(loc.inaccurate);
+        const warn = stale || inaccurate;
+
+        if (overlay) overlay.classList.add('hidden');
+        if (staleBanner) staleBanner.classList.toggle('hidden', !stale);
+        if (recenterBtn) recenterBtn.classList.remove('hidden');
+
+        if (dot) {
+            dot.className = `indicator-dot ${warn ? 'text-amber' : 'text-teal'}`;
+        }
+        if (badge) {
+            if (stale) {
+                badge.className = 'status-badge badge-warning';
+                badge.textContent = 'STALE';
+            } else if (inaccurate) {
+                badge.className = 'status-badge badge-warning';
+                badge.textContent = 'LOW ACCURACY';
+            } else {
+                badge.className = 'status-badge badge-success';
+                badge.textContent = 'LIVE';
+            }
+        }
+
+        const accRound = loc.accuracy_m != null ? Math.round(loc.accuracy_m) : null;
+        const apTxt = loc.ap_count ? ` (${loc.ap_count} APs)` : '';
+        const ageTxt = _formatAgeShort(loc.age_s);
+        const timeStr = new Date(loc.updated_at * 1000).toLocaleTimeString();
+        const coordsStr = `${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}`;
+        const accStr = accRound != null
+            ? (inaccurate ? `±${accRound}m (Wide)` : `±${accRound}m${apTxt}`)
+            : `--${apTxt}`;
+        const updStr = stale ? `${timeStr} (${ageTxt} · Stale)` : (ageTxt ? `${timeStr} (${ageTxt})` : timeStr);
+
+        const uiSig = `${coordsStr}|${accStr}|${updStr}|${warn}`;
+        if (uiSig !== _locState.lastUiTextSig) {
+            _locState.lastUiTextSig = uiSig;
+            _setText('loc-coords-val', coordsStr);
+            _setText('loc-accuracy-val', accStr);
+            _setText('loc-updated-val', updStr);
+        }
+
+        const geoSig = `${loc.lat.toFixed(6)},${loc.lng.toFixed(6)},${accRound ?? ''},${warn ? 1 : 0}`;
+        const prevHadFix = _locState.lat !== null && _locState.lng !== null;
+        _locState.lat = loc.lat;
+        _locState.lng = loc.lng;
+        _locState.acc = accRound;
+        _locState.warn = warn;
+
+        const leafletReady = _ensureLeafletMap();
+        if (leafletReady && !_locState.useFallback) {
+            const fbEl = document.getElementById('location-fallback-canvas');
+            const mapEl = document.getElementById('location-map-canvas');
+            if (fbEl) fbEl.classList.add('hidden');
+            if (mapEl) mapEl.classList.remove('hidden');
+
+            if (geoSig !== _locState.lastGeoSig || !_locState.marker) {
+                _locState.lastGeoSig = geoSig;
+                const pos = [loc.lat, loc.lng];
+                const color = warn ? '#f59e0b' : '#00f0ff';
+                const pinIcon = window.L.divIcon({
+                    className: '',
+                    html: `<div class="loc-rover-pin${warn ? ' loc-rover-pin--warn' : ''}"></div>`,
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8],
+                });
+
+                if (!_locState.marker) {
+                    _locState.marker = window.L.marker(pos, { icon: pinIcon }).addTo(_locState.map);
+                } else {
+                    _locState.marker.setLatLng(pos);
+                    _locState.marker.setIcon(pinIcon);
+                }
+                _locState.marker.bindTooltip(
+                    `Wi-Fi Estimated · ${coordsStr}${accRound != null ? ` (±${accRound}m)` : ''}`,
+                    { direction: 'top', offset: [0, -8] }
+                );
+
+                const radius = accRound != null ? Math.max(15, accRound) : 45;
+                if (!_locState.circle) {
+                    _locState.circle = window.L.circle(pos, {
+                        radius,
+                        color,
+                        weight: 1.5,
+                        opacity: 0.75,
+                        fillColor: color,
+                        fillOpacity: 0.14,
+                    }).addTo(_locState.map);
+                } else {
+                    _locState.circle.setLatLng(pos);
+                    _locState.circle.setRadius(radius);
+                    _locState.circle.setStyle({ color, fillColor: color });
+                }
+
+                if (!_locState.userPanned) {
+                    _focusMapOnCar(loc.lat, loc.lng, accRound, !prevHadFix);
+                }
+            }
+        } else {
+            // Leaflet CDN not yet loaded or offline: render tactile canvas fallback cleanly
+            const mapEl = document.getElementById('location-map-canvas');
+            const fbEl = document.getElementById('location-fallback-canvas');
+            if (mapEl) mapEl.classList.add('hidden');
+            if (fbEl) fbEl.classList.remove('hidden');
+            if (geoSig !== _locState.lastGeoSig || !_locState.marker) {
+                _locState.lastGeoSig = geoSig;
+                _drawLocationFallbackCanvas(loc.lat, loc.lng, accRound, warn);
+            }
+        }
+    }
+
+    function _renderLocationOffline() {
+        if (_locState.lat != null && _locState.lng != null) {
+            _locState.lastUiTextSig = '';
+            _renderLocation({
+                lat: _locState.lat,
+                lng: _locState.lng,
+                accuracy_m: _locState.acc,
+                updated_at: Date.now() / 1000,
+                stale: true,
+                inaccurate: Boolean(_locState.acc && _locState.acc > 500),
+                age_s: null,
+            }, false);
+            _setText('loc-updated-val', 'Backend offline (Stale)');
+        } else {
+            _renderLocation(null, false);
+        }
     }
 
     /* ── E-Stop ───────────────────────────────────────────────── */
@@ -1642,16 +2004,20 @@
     }
 
     async function _checkAuthOnStartup() {
+        const existing = API.getSession();
+        if (existing && existing.token && existing.user) {
+            _renderUserNav(existing.user);
+        }
         try {
             const me = await API.getAuthMe();
             if (me && me.authenticated && me.user) {
-                const existing = API.getSession() || {};
-                if (existing.token) {
+                if (existing && existing.token) {
                     API.setSession({ ...existing, user: me.user, expires_at: me.expires_at });
                 }
                 _enterDashboard(me.user, me.expires_at);
                 return;
             }
+            API.clearSession();
         } catch (_) {
             API.clearSession();
         }
@@ -1796,25 +2162,29 @@
         _enterDashboard(res.user, res.expires_at);
     }
 
+    function _renderUserNav(user) {
+        if (!user) return;
+        const name = user.name || user.email || 'Operator';
+        _setText('nav-user-name', name);
+        const av = document.getElementById('nav-user-avatar');
+        if (av) {
+            if (user.avatar_url) {
+                av.innerHTML = `<img src="${_esc(user.avatar_url)}" alt="">`;
+            } else {
+                av.textContent = name.trim().charAt(0).toUpperCase() || 'U';
+            }
+        }
+    }
+
     function _enterDashboard(user, expiresAt) {
         _stopAuthSceneAnimation();
         const authEl = document.getElementById('auth-screen');
         const appEl = document.getElementById('app-shell');
         if (authEl) authEl.classList.add('hidden');
         if (appEl) appEl.classList.remove('hidden');
+        document.documentElement.classList.remove('session-boot-dash');
 
-        if (user) {
-            const name = user.name || user.email || 'Operator';
-            _setText('nav-user-name', name);
-            const av = document.getElementById('nav-user-avatar');
-            if (av) {
-                if (user.avatar_url) {
-                    av.innerHTML = `<img src="${_esc(user.avatar_url)}" alt="">`;
-                } else {
-                    av.textContent = name.trim().charAt(0).toUpperCase() || 'U';
-                }
-            }
-        }
+        _renderUserNav(user);
 
         clearTimeout(_expiryTimer);
         if (expiresAt) {
@@ -1837,6 +2207,7 @@
         }
         Charts.refresh();
         _startDashSceneAnimation();
+        setTimeout(_invalidateLocMapSize, 80);
     }
 
     function _showAuthScreen(noticeMsg) {
@@ -1846,6 +2217,7 @@
         const appEl = document.getElementById('app-shell');
         if (appEl) appEl.classList.add('hidden');
         if (authEl) authEl.classList.remove('hidden');
+        document.documentElement.classList.remove('session-boot-dash');
         _setAuthMode('login');
         if (noticeMsg) {
             _showAuthFeedback(noticeMsg, 'info');

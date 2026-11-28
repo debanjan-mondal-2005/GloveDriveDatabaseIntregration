@@ -21,6 +21,9 @@ const char*    DEVICE_ID = "main";
 
 #define TELEMETRY_MS           200     // 5 messages per second to the hub
 #define COMMUNICATION_TIMEOUT  500     // ESP-NOW: stop the car if no glove packet for this long (ms)
+#define WIFI_SCAN_MS           30000UL // non-blocking nearby Wi-Fi scan interval while car is ON
+#define WIFI_SCAN_BOOT_MS      2500UL  // initial scan shortly after connecting to hub
+#define WIFI_SCAN_MAX_APS      12      // strongest APs sent to hub for geolocation
 
 #define DEFAULT_STOP_CM  20
 #define BEEP_ZONE_CM     40
@@ -368,6 +371,102 @@ void sendTelemetry() {
 }
 
 // ---------------- WIFI ----------------
+void updateWifiLocationScan() {
+  static bool          scanRunning = false;
+  static bool          didFirstScan = false;
+  static unsigned long lastScanStartMs = 0;
+  static unsigned long wsUpSinceMs = 0;
+
+  unsigned long now = millis();
+  bool carActive = (WiFi.status() == WL_CONNECTED && ws.isConnected());
+
+  if (!carActive) {
+    if (scanRunning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
+      WiFi.scanDelete();
+      scanRunning = false;
+    }
+    wsUpSinceMs = 0;
+    didFirstScan = false;
+    return;
+  }
+
+  if (wsUpSinceMs == 0) wsUpSinceMs = now;
+
+  if (scanRunning) {
+    int16_t res = WiFi.scanComplete();
+    if (res == WIFI_SCAN_RUNNING) return; // still scanning in background RTOS task
+
+    scanRunning = false;
+    if (res > 0) {
+      // Pick strongest AP indices (by RSSI descending) without blocking or large allocations
+      int topIdx[WIFI_SCAN_MAX_APS];
+      int topRssi[WIFI_SCAN_MAX_APS];
+      int count = 0;
+
+      for (int i = 0; i < res; i++) {
+        uint8_t* bssid = WiFi.BSSID(i);
+        if (!bssid) continue;
+        int rssi = WiFi.RSSI(i);
+        if (count < WIFI_SCAN_MAX_APS) {
+          topIdx[count] = i;
+          topRssi[count] = rssi;
+          count++;
+        } else {
+          int minPos = 0;
+          for (int j = 1; j < WIFI_SCAN_MAX_APS; j++) {
+            if (topRssi[j] < topRssi[minPos]) minPos = j;
+          }
+          if (rssi > topRssi[minPos]) {
+            topIdx[minPos] = i;
+            topRssi[minPos] = rssi;
+          }
+        }
+      }
+
+      if (count > 0) {
+        JsonDocument doc;
+        doc["device"] = DEVICE_ID;
+        doc["type"] = "wifi_scan";
+        doc["uptime_ms"] = now;
+        JsonArray aps = doc["aps"].to<JsonArray>();
+        for (int k = 0; k < count; k++) {
+          int idx = topIdx[k];
+          uint8_t* bssid = WiFi.BSSID(idx);
+          if (!bssid) continue;
+          char mac[18];
+          snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                   bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+          JsonObject ap = aps.add<JsonObject>();
+          ap["bssid"] = mac;
+          ap["rssi"] = WiFi.RSSI(idx);
+          ap["ch"] = WiFi.channel(idx);
+        }
+        String payload;
+        serializeJson(doc, payload);
+        ws.sendTXT(payload);
+        Serial.printf("[LOC] Sent %d Wi-Fi APs for geolocation\n", count);
+      }
+    }
+    WiFi.scanDelete();
+    return;
+  }
+
+  bool scanDue = !didFirstScan
+    ? (now - wsUpSinceMs >= WIFI_SCAN_BOOT_MS)
+    : (now - lastScanStartMs >= WIFI_SCAN_MS);
+
+  if (scanDue) {
+    didFirstScan = true;
+    lastScanStartMs = now;
+    int16_t st = WiFi.scanNetworks(true, false); // async=true, show_hidden=false
+    if (st == WIFI_SCAN_RUNNING) {
+      scanRunning = true;
+    } else if (st >= 0) {
+      scanRunning = true; // collect on next loop tick
+    }
+  }
+}
+
 void wifiKeepAlive() {
   static unsigned long lastTry = 0;
   static bool wasConnected = false;
@@ -456,6 +555,7 @@ void loop() {
 
   wifiKeepAlive();
   if (WiFi.status() == WL_CONNECTED) ws.loop();
+  updateWifiLocationScan();
   sendTelemetry();
 
   delay(1);

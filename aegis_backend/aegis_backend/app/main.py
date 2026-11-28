@@ -23,6 +23,12 @@ DB_URL = E("DATABASE_URL", "")
 UNIT = E("UNIT_ID", "GLOVEDRIVE-ESP32-01")
 CAMERA_STREAM_URL = E("CAMERA_STREAM_URL", "")
 GOOGLE_CLIENT_ID = E("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_GEOLOCATION_API_KEY = (
+    E("GOOGLE_GEOLOCATION_API_KEY", "").strip()
+    or E("VITE_GOOGLE_MAPS_API_KEY", "").strip()
+)
+LOCATION_STALE_S = float(E("LOCATION_STALE_S", 90))
+LOCATION_MIN_INTERVAL_S = float(E("LOCATION_MIN_INTERVAL_S", 12))
 RESEND_API_KEY = E("RESEND_API_KEY", "").strip()
 EMAIL_FROM = E("EMAIL_FROM", "").strip()
 AUTH_SESSION_TTL_S = int(E("AUTH_SESSION_TTL_S", 7 * 24 * 3600))
@@ -45,6 +51,18 @@ alerts = deque(maxlen=60)
 pending = deque(maxlen=20000)     # (table, row) waiting for Supabase
 db = {"pool": None, "ok": False, "records": 0, "schema_ready": False}
 cool, state = {}, {"estop": False, "prev": (60, 60), "jpg": None, "jpg_t": 0, "alert_seq": 0}
+_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+location_state = {
+    "lat": None,
+    "lng": None,
+    "accuracy_m": None,
+    "ap_count": 0,
+    "updated_at": None,
+    "last_scan_at": None,
+    "last_api_t": 0.0,
+    "resolving": False,
+    "error": None,
+}
 SESSION_DB_PATH = None
 session_sync_queue = deque(maxlen=500)
 active_session = None
@@ -947,6 +965,142 @@ def _end_session(now: float, reason: str = "ESP32 Car Disconnected"):
     return s
 
 
+def _normalize_wifi_aps(raw_aps: list) -> list[dict]:
+    """Validate, deduplicate, and sort Wi-Fi AP scan entries strongest-first."""
+    by_mac: dict[str, dict] = {}
+    for item in raw_aps:
+        if not isinstance(item, dict):
+            continue
+        mac = str(item.get("bssid") or item.get("macAddress") or "").strip().lower()
+        if not _MAC_RE.match(mac) or mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+            continue
+        try:
+            rssi = int(item.get("rssi") if item.get("rssi") is not None else item.get("signalStrength"))
+        except (TypeError, ValueError):
+            continue
+        if rssi > 0 or rssi < -120:
+            continue
+        entry = {"macAddress": mac, "signalStrength": rssi}
+        ch = item.get("ch") if item.get("ch") is not None else item.get("channel")
+        try:
+            ch_i = int(ch)
+            if 1 <= ch_i <= 165:
+                entry["channel"] = ch_i
+        except (TypeError, ValueError):
+            pass
+        prev = by_mac.get(mac)
+        if prev is None or rssi > prev["signalStrength"]:
+            by_mac[mac] = entry
+    ordered = sorted(by_mac.values(), key=lambda x: x["signalStrength"], reverse=True)
+    return ordered[:15]
+
+
+def _sanitize_geo_err(msg: str) -> str:
+    return re.sub(r"(key=)[^&\s]+", r"\1***", str(msg or "Geolocation lookup failed"))[:160]
+
+
+def _google_geolocate_sync(wifi_aps: list[dict]) -> dict:
+    if not GOOGLE_GEOLOCATION_API_KEY:
+        raise RuntimeError("Google Geolocation API key not configured on backend")
+    url = "https://www.googleapis.com/geolocation/v1/geolocate?" + urllib.parse.urlencode(
+        {"key": GOOGLE_GEOLOCATION_API_KEY}
+    )
+    body = json.dumps({"considerIp": False, "wifiAccessPoints": wifi_aps}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = f"HTTP {e.code}"
+        try:
+            err_body = json.loads(e.read().decode("utf-8"))
+            err_msg = (err_body.get("error") or {}).get("message")
+            if err_msg:
+                detail = f"HTTP {e.code}: {err_msg}"
+        except Exception:
+            pass
+        raise RuntimeError(_sanitize_geo_err(detail))
+    except Exception as e:
+        raise RuntimeError(_sanitize_geo_err(f"Geolocation request error ({type(e).__name__})"))
+
+    loc = data.get("location") or {}
+    lat = loc.get("lat")
+    lng = loc.get("lng")
+    acc = data.get("accuracy")
+    if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+        raise RuntimeError("Invalid coordinates returned by Google Geolocation API")
+    if not (-90 <= float(lat) <= 90 and -180 <= float(lng) <= 180):
+        raise RuntimeError("Out-of-range coordinates returned by Google Geolocation API")
+    acc_val = float(acc) if isinstance(acc, (int, float)) and float(acc) > 0 else 100.0
+    return {"lat": float(lat), "lng": float(lng), "accuracy": acc_val}
+
+
+async def _resolve_wifi_location(raw_aps: list):
+    now = time.time()
+    location_state["last_scan_at"] = now
+    aps = _normalize_wifi_aps(raw_aps)
+    if len(aps) < 2:
+        location_state["error"] = "Need at least 2 nearby Wi-Fi networks to estimate location"
+        return
+    if not GOOGLE_GEOLOCATION_API_KEY:
+        location_state["error"] = "Google Geolocation API key missing in server .env"
+        return
+    if location_state["resolving"] or (now - location_state["last_api_t"] < LOCATION_MIN_INTERVAL_S):
+        return
+
+    location_state["resolving"] = True
+    location_state["last_api_t"] = now
+    try:
+        res = await asyncio.to_thread(_google_geolocate_sync, aps)
+        location_state["lat"] = round(res["lat"], 7)
+        location_state["lng"] = round(res["lng"], 7)
+        location_state["accuracy_m"] = round(res["accuracy"], 1)
+        location_state["ap_count"] = len(aps)
+        location_state["updated_at"] = time.time()
+        location_state["error"] = None
+    except Exception as exc:
+        location_state["error"] = _sanitize_geo_err(str(exc))
+    finally:
+        location_state["resolving"] = False
+
+
+def _public_location() -> dict:
+    now = time.time()
+    upd = location_state["updated_at"]
+    car_status = status(devs["main"])
+    has_fix = location_state["lat"] is not None and location_state["lng"] is not None and upd is not None
+    age_s = round(max(0.0, now - upd), 1) if has_fix else None
+    stale = bool(has_fix and (age_s > LOCATION_STALE_S or (car_status == "OFFLINE" and age_s > 35.0)))
+    acc = location_state["accuracy_m"]
+    inaccurate = bool(has_fix and acc is not None and acc > 500.0)
+    quality = ("high" if acc <= 120 else ("medium" if acc <= 500 else "low")) if (has_fix and acc is not None) else None
+    if has_fix:
+        loc_status = "stale" if stale else ("inaccurate" if inaccurate else "ok")
+    else:
+        loc_status = "error" if location_state["error"] else "unavailable"
+    return {
+        "status": loc_status,
+        "source": "Wi-Fi Estimated",
+        "lat": location_state["lat"],
+        "lng": location_state["lng"],
+        "accuracy_m": acc,
+        "accuracy_quality": quality,
+        "inaccurate": inaccurate,
+        "stale": stale,
+        "ap_count": location_state["ap_count"],
+        "updated_at": upd,
+        "age_s": age_s,
+        "last_scan_at": location_state["last_scan_at"],
+        "configured": bool(GOOGLE_GEOLOCATION_API_KEY),
+        "error": location_state["error"],
+    }
+
+
 def on_message(name, text):
     d, now = devs[name], time.time()
     try: msg = json.loads(text)
@@ -955,6 +1109,14 @@ def on_message(name, text):
     if msg.get("type") == "pong":
         t0 = d["pings"].pop(msg.get("n"), None)
         if t0: d["rtt"] = round((time.perf_counter() - t0) * 1000, 1)
+        return
+    if msg.get("type") == "wifi_scan" and name == "main":
+        aps = msg.get("aps")
+        if isinstance(aps, list):
+            try:
+                asyncio.get_running_loop().create_task(_resolve_wifi_location(aps))
+            except RuntimeError:
+                pass
         return
     s = msg.get("seq")
     if isinstance(s, int):
@@ -1039,6 +1201,7 @@ def snapshot():
     return dict(t=time.time(), estop=state["estop"],
                 db=dict(ok=db["ok"], queue=len(pending), records=db["records"], hist_count=len(hist)),
                 tel=telemetry(),
+                location=_public_location(),
                 nodes=[dict(id=k, title=NODES[k][0], proto=NODES[k][1], ip=d["ip"], status=status(d), rate=rate(d),
                             rtt=d["rtt"], rssi=d["rssi"], lost=d["lost"], conns=d["conns"], data=d["data"])
                        for k, d in devs.items()],

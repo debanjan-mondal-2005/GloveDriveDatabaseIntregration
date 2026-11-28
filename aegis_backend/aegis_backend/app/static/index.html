@@ -16,11 +16,23 @@
     <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
+    <!-- Leaflet Interactive Map (dark map tiles; no backend API keys exposed) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
+
     <!-- Google Identity Services (for Continue with Google) -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/css/style.css?v=18">
+    <link rel="stylesheet" href="/css/style.css?v=20">
+    <script>
+        try {
+            var _s = JSON.parse(localStorage.getItem('aegis_auth_session') || 'null');
+            if (_s && _s.token && (!_s.expires_at || _s.expires_at * 1000 > Date.now())) {
+                document.documentElement.classList.add('session-boot-dash');
+            }
+        } catch (_) {}
+    </script>
 </head>
 
 <body class="dark-theme">
@@ -451,6 +463,8 @@
                 <!-- 1. OVERVIEW VIEW -->
                 <!-- ============================================================== -->
                 <section id="view-overview" class="view-section active">
+                    <!-- TOP OVERVIEW ROW: Hero Vehicle Card (Left) + Live Car Location Map (Right) -->
+                    <div class="overview-hero-location-grid">
                     <!-- Hero Vehicle Status Card -->
                     <div class="card hero-vehicle-card">
                         <div class="card-header">
@@ -754,6 +768,52 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Right: Live Wi-Fi Estimated Car Location Map -->
+                    <div class="card location-map-card">
+                        <div class="card-header">
+                            <div class="chart-title-group">
+                                <span id="loc-live-dot" class="indicator-dot text-amber"></span>
+                                <h3>CAR LOCATION</h3>
+                            </div>
+                            <div class="location-badges">
+                                <span class="badge-tag tag-cyan">Wi-Fi Estimated</span>
+                                <span id="loc-status-badge" class="status-badge badge-warning">UNAVAILABLE</span>
+                            </div>
+                        </div>
+
+                        <div id="location-map-viewport" class="location-map-viewport">
+                            <div id="location-map-canvas" class="location-map-canvas"></div>
+                            <canvas id="location-fallback-canvas" class="location-fallback-canvas hidden"></canvas>
+                            <div id="location-stale-banner" class="location-stale-banner hidden font-mono">
+                                STALE · SHOWING LAST KNOWN POSITION
+                            </div>
+                            <div id="location-overlay-state" class="location-overlay-state">
+                                <div id="location-overlay-title" class="loc-overlay-badge font-mono">LOCATION UNAVAILABLE</div>
+                                <div id="location-overlay-msg" class="text-xs text-muted">
+                                    Waiting for ESP32 Car Wi-Fi scan (updates every 30s while ON)
+                                </div>
+                            </div>
+                            <button id="loc-recenter-btn" class="loc-recenter-btn hidden" type="button"
+                                title="Center map on car">Center</button>
+                        </div>
+
+                        <div class="location-meta-footer">
+                            <div class="loc-meta-item">
+                                <span class="loc-meta-label">COORDINATES</span>
+                                <span id="loc-coords-val" class="font-mono text-cyan">-- , --</span>
+                            </div>
+                            <div class="loc-meta-item">
+                                <span class="loc-meta-label">ACCURACY</span>
+                                <span id="loc-accuracy-val" class="font-mono text-primary">--</span>
+                            </div>
+                            <div class="loc-meta-item">
+                                <span class="loc-meta-label">LAST UPDATED</span>
+                                <span id="loc-updated-val" class="font-mono text-muted">--</span>
+                            </div>
+                        </div>
+                    </div>
                     </div>
 
                     <!-- HARDWARE CONTROLS + COMPACT CAMERA ROW -->
@@ -1403,10 +1463,10 @@
     </div>
 
     <!-- Application JavaScript Modules -->
-    <script src="/js/api.js?v=18"></script>
-    <script src="/js/charts.js?v=18"></script>
-    <script src="/js/camera.js?v=18"></script>
-    <script src="/js/app.js?v=18"></script>
+    <script src="/js/api.js?v=20"></script>
+    <script src="/js/charts.js?v=20"></script>
+    <script src="/js/camera.js?v=20"></script>
+    <script src="/js/app.js?v=20"></script>
 </body>
 
 </html>
